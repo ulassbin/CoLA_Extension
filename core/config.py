@@ -11,7 +11,7 @@ cfg = edict()
 
 # NCE Specific Parameters
 cfg.PROJ_DIM = 128
-cfg.NCE_WEIGHT = 0.5
+cfg.NCE_WEIGHT = 0.0 # 0.5
 cfg.QUEUE_SIZE = 50000
 cfg.SAMPLING_RATE = 0.2
 cfg.LOG_PATH = '/home/ulas/Documents/PhD/2.Codes/CoLA/experiments'
@@ -19,8 +19,11 @@ cfg.LOG_PATH = '/home/ulas/Documents/PhD/2.Codes/CoLA/experiments'
 cfg.PSEUDO_WEIGHT = 0.5
 
 # Latent Representation parameters
-cfg.LATENT_LOSS_WEIGHT = 0.1
-
+cfg.LATENT_LOSS_WEIGHT = 1 # Really force latent representation to be similar
+cfg.PRETRAIN_ENCODER_DECODER = True
+cfg.PRETRAIN_BATCH_SIZE = 50
+cfg.PRETRAIN_NUM_ITERS = 200
+cfg.LATENT_LOSS_PRE = 1000
 # CoLA Configurations
 cfg.GPU_ID = '0'
 cfg.LR = '[0.0001]*6000'

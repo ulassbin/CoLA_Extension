@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings("ignore")
 import core.utils as utils
 from core.model import CoLA
-from core.loss import TotalLoss
+from core.loss import TotalLoss, LatentLoss 
 from core.config import cfg
 from core.utils import AverageMeter
 from core.dataset import NpyFeature
@@ -66,6 +66,22 @@ class Trainer:
       sampled = embeddings[torch.arange(batch_size).unsqueeze(1), sample_indexes]
       return sampled  # Keeps gradients
 
+
+  def pretrain_encoder_decoder_step(self, net, loader_iter, optimizer, criterion, writer, step):
+      net.train()
+      data, label, _, _, _ = next(loader_iter)
+      data = data.cuda()
+      label = label.cuda()
+      optimizer.zero_grad()
+      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      criterion = LatentLoss()
+      decoded_inter = all_embeddings[2]
+      decoded_intra = all_embeddings[3]
+      cost = cfg.LATENT_LOSS_PRE * (criterion(data, decoded_inter) + criterion(data, decoded_intra))/2.0
+      cost.backward()
+      optimizer.step()
+      writer.add_scalar('PRE_Latent Loss', cost.cpu().item(), step)
+      return cost
 
   def train_one_step(self, net, loader_iter, optimizer, criterion, writter, step):
       net.train()
@@ -160,6 +176,47 @@ def main():
     print('=> test frequency: {} steps'.format(cfg.TEST_FREQ))
     print('=> start training...')
     trainer = Trainer(cfg)
+
+
+    pre_train_loader = torch.utils.data.DataLoader(
+        NpyFeature(data_path=cfg.DATA_PATH, mode='train',
+                        modal=cfg.MODAL, feature_fps=cfg.FEATS_FPS,
+                        num_segments=cfg.NUM_SEGMENTS, supervision='weak',
+                        class_dict=cfg.CLASS_DICT, seed=cfg.SEED, sampling='random'),
+            batch_size=cfg.PRETRAIN_BATCH_SIZE,
+            shuffle=True, num_workers=cfg.NUM_WORKERS,
+            worker_init_fn=worker_init_fn)
+
+
+
+    if cfg.PRETRAIN_ENCODER_DECODER:
+        for step in range(1, cfg.PRETRAIN_NUM_ITERS + 1):
+            if step > 1 and cfg.LR[step - 1] != cfg.LR[step - 2]:
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = cfg.LR[step - 1]
+
+            if (step - 1) % len(pre_train_loader) == 0:
+                loader_iter = iter(pre_train_loader)
+
+            batch_time = AverageMeter()
+            losses = AverageMeter()
+            end = time.time()
+            cost = trainer.pretrain_encoder_decoder_step(net, loader_iter, optimizer, criterion, writter, step)
+            losses.update(cost.item(), cfg.BATCH_SIZE)
+            batch_time.update(time.time() - end)
+            end = time.time()
+            if step == 1 or step % cfg.PRINT_FREQ == 0:
+                print(('PRETRAIN: Step: [{0:04d}/{1}]\t' \
+                    'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' \
+                    'Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
+                    step, cfg.PRETRAIN_NUM_ITERS, batch_time=batch_time, loss=losses)))
+    # How to free memory here?
+    del pre_train_loader
+    del loader_iter
+    torch.cuda.empty_cache()
+    print('=> pretraining done...')
+    print('=> start training...')
+
     for step in range(1, cfg.NUM_ITERS + 1):
         if step > 1 and cfg.LR[step - 1] != cfg.LR[step - 2]:
             for param_group in optimizer.param_groups:
