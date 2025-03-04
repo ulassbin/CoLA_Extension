@@ -22,6 +22,87 @@ from torch.utils.tensorboard import SummaryWriter
 from eval.eval_detection import ANETdetection
 from terminaltables import AsciiTable
 
+from NCELoss.NNIICLUV_Tests.custom_queue import Queue
+
+
+class Trainer:
+  def __init__(self, cfg):
+      self.cfg = cfg
+      self.queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
+      self.nn_queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
+      self.initialized = False
+
+  def initialize(self, embeddings):
+      print('Initializeing with ', embeddings.shape)
+      self.queue.enqueue(embeddings)
+      self.initialized = True
+      return
+
+  def get_positives_video_distance(self, full_embeddings, temporal, embedding_dim, debug=False):
+      # In this function we will get the positives by using fft based distance calculation
+      batch_size, temporal, embedding_dim = full_embeddings.shape
+      polled_vids = batch_size
+      vid_embeddings, vid_indices = self.queue.find_nearest_vids(full_embeddings)# Implement this
+      #if vid_labels is not None:
+      #    vid_labels = vid_labels.reshape(batch_size, 3)
+      return vid_embeddings, vid_indices#, vid_labels
+  
+  
+  def get_positives(self, intra_embeddings, temporal, embedding_dim, debug=False): # In future get K input
+    batch_size, temporal, embedding_dim = intra_embeddings.shape
+    intra_embeddings = intra_embeddings.reshape(batch_size * temporal, embedding_dim)
+    nn_indices, nn_embeddings, nn_labels = self.queue.find_nearest_neighbors(intra_embeddings)
+    nn_embeddings = nn_embeddings.reshape(batch_size, temporal, embedding_dim)
+    nn_indices = nn_indices.reshape(batch_size, temporal)
+    if nn_labels is not None:
+      nn_labels = nn_labels.reshape(batch_size, temporal, 3)
+    return nn_indices, nn_embeddings, nn_labels
+  
+  def sample_embeddings(self, embeddings):
+      batch_size, t, feature_dim = embeddings.shape  # Assuming fixed t
+      new_size = int(self.cfg.SAMPLING_RATE * t)
+      sample_indexes = torch.randint(0, t, (batch_size, new_size), device=embeddings.device)
+      # Use advanced indexing to preserve gradients
+      sampled = embeddings[torch.arange(batch_size).unsqueeze(1), sample_indexes]
+      return sampled  # Keeps gradients
+
+
+  def train_one_step(self, net, loader_iter, optimizer, criterion, writter, step):
+      net.train()
+      
+      data, label, _, _, _ = next(loader_iter)
+      data = data.cuda()
+      label = label.cuda()
+
+      optimizer.zero_grad()
+      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      # all_embbeddings are [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
+      # Sample intra_embeddings
+      intra_embeddings = all_embeddings[0]
+      embedding_targets = self.sample_embeddings(intra_embeddings)
+      #print('Embedding Targets {}, Intra Embeddings {}'.format(embedding_targets.shape, intra_embeddings.shape))
+
+      if not self.initialized:
+          self.initialize(embedding_targets)
+      # Snippet Contrastive Learning
+      positive_indices, positives, positive_labels = self.get_positives(embedding_targets, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
+      negatives, negative_indexes = self.queue.getNegatives(positive_indices)
+      # Video Contrastive Learning
+      vid_positives, vid_positives_indices = self.get_positives_video_distance(intra_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
+      with torch.no_grad():
+          pseudo_labels, _, _  = net.forward_with_embeddings(vid_positives) # The issue here is vid_positives are 128 feature size not 2048
+                                                            # So we cant use it directly to feed it to the model. But that was a good try.
+      #print('Embeddins {}, Positives {}, Negatives {}'.format(intra_embeddings.shape, positives.shape, negatives.shape))
+      cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, pseudo_labels,
+                             [data, all_embeddings[2], all_embeddings[3]])
+      
+      cost.backward()
+      optimizer.step()
+      self.queue.enqueue(intra_embeddings)
+      for key in loss.keys():
+          writter.add_scalar(key, loss[key].cpu().item(), step)
+      return cost
+
 def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.GPU_ID
     worker_init_fn = None
@@ -35,6 +116,7 @@ def main():
     net = CoLA(cfg)
     net = net.cuda()
 
+    print('Log Path: {}'.format(cfg.LOG_PATH))
     train_loader = torch.utils.data.DataLoader(
         NpyFeature(data_path=cfg.DATA_PATH, mode='train',
                         modal=cfg.MODAL, feature_fps=cfg.FEATS_FPS,
@@ -60,8 +142,8 @@ def main():
     
     best_mAP = -1
 
-    criterion = TotalLoss()
-
+    criterion = TotalLoss(cfg)
+  
     cfg.LR = eval(cfg.LR)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.LR[0],
         betas=(0.9, 0.999), weight_decay=0.0005)
@@ -77,6 +159,7 @@ def main():
         
     print('=> test frequency: {} steps'.format(cfg.TEST_FREQ))
     print('=> start training...')
+    trainer = Trainer(cfg)
     for step in range(1, cfg.NUM_ITERS + 1):
         if step > 1 and cfg.LR[step - 1] != cfg.LR[step - 2]:
             for param_group in optimizer.param_groups:
@@ -89,7 +172,7 @@ def main():
         losses = AverageMeter()
         
         end = time.time()
-        cost = train_one_step(net, loader_iter, optimizer, criterion, writter, step)
+        cost = trainer.train_one_step(net, loader_iter, optimizer, criterion, writter, step,)
         losses.update(cost.item(), cfg.BATCH_SIZE)
         batch_time.update(time.time() - end)
         end = time.time()
@@ -120,24 +203,6 @@ def main():
 
     print(utils.table_format(best_test_info, cfg.TIOU_THRESH, '[CoLA] THUMOS\'14 Performance'))
 
-def train_one_step(net, loader_iter, optimizer, criterion, writter, step):
-    net.train()
-    
-    data, label, _, _, _ = next(loader_iter)
-    data = data.cuda()
-    label = label.cuda()
-
-    optimizer.zero_grad()
-    video_scores, contrast_pairs, _, _ = net(data)
-    cost, loss = criterion(video_scores, label, contrast_pairs)
-
-    cost.backward()
-    optimizer.step()
-
-    for key in loss.keys():
-        writter.add_scalar(key, loss[key].cpu().item(), step)
-    return cost
-
 @torch.no_grad()
 def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=None):
     net.eval()
@@ -155,7 +220,7 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
         data, label = data.cuda(), label.cuda()
         vid_num_seg = vid_num_seg[0].cpu().item()
 
-        video_scores, _, actionness, cas = net(data)
+        video_scores, _, actionness, cas, all_embeddings = net(data) # No use for embeddings here.
 
         label_np = label.cpu().data.numpy()
         score_np = video_scores[0].cpu().data.numpy()

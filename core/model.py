@@ -8,6 +8,8 @@ import torch.nn as nn
 import numpy as np
 from scipy import ndimage
 
+from NCELoss.NNIICLUV_Tests.model import NearestNeighborContrastiveI3D
+
 # (a) Feature Embedding and (b) Actionness Modeling
 class Actionness_Module(nn.Module):
     def __init__(self, len_feature, num_classes):
@@ -36,6 +38,13 @@ class Actionness_Module(nn.Module):
         actionness = cas.sum(dim=2)
         return embeddings, cas, actionness
 
+    def forward_from_embeddings(self, x):
+        out = x.permute(0, 2, 1)
+        out = self.f_cls(out)
+        cas = out.permute(0, 2, 1)
+        actionness = cas.sum(dim=2)
+        return x, cas, actionness
+    
 # CoLA Pipeline
 class CoLA(nn.Module):
     def __init__(self, cfg):
@@ -44,6 +53,7 @@ class CoLA(nn.Module):
         self.num_classes = cfg.NUM_CLASSES
 
         self.actionness_module = Actionness_Module(cfg.FEATS_DIM, cfg.NUM_CLASSES)
+        self.projection_module = NearestNeighborContrastiveI3D(cfg.FEATS_DIM, cfg.PROJ_DIM)
 
         self.softmax = nn.Softmax(dim=1)
         self.softmax_2 = nn.Softmax(dim=2)
@@ -107,7 +117,7 @@ class CoLA(nn.Module):
         k_hard = num_segments // self.r_hard
 
         embeddings, cas, actionness = self.actionness_module(x)
-
+        intra_embeddings, inter_embeddings, decoded_intra, decoded_inter = self.projection_module(embeddings)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
         hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)
         
@@ -119,5 +129,27 @@ class CoLA(nn.Module):
             'HA': hard_act,
             'HB': hard_bkg
         }
+        return video_scores, contrast_pairs, actionness, cas, [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
 
-        return video_scores, contrast_pairs, actionness, cas
+    def forward_with_embeddings(self, latent_embeddings):
+        num_segments = latent_embeddings.shape[1]
+        k_easy = num_segments // self.r_easy
+        k_hard = num_segments // self.r_hard
+
+        decoded_inter, decoded_intra = self.projection_module.from_latent_space(latent_embeddings) # In future this should handle both intra and inter embeddings.
+        embeddings = (decoded_inter + decoded_intra)/2 # Just combine encodings.
+        #print('Decoded Inter Shape:', decoded_inter.shape, 'Decoded Intra Shape:', decoded_intra.shape, 'Embeddings Shape:', embeddings.shape)
+        embeddings, cas, actionness = self.actionness_module.forward_from_embeddings(embeddings) 
+        #intra_embeddings, inter_embeddings = self.projection_module(embeddings)
+        
+        easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
+        hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)
+        
+        contrast_pairs = {
+            'EA': easy_act,
+            'EB': easy_bkg,
+            'HA': hard_act,
+            'HB': hard_bkg
+        }
+        video_scores = self.get_video_cls_scores(cas, k_easy)
+        return video_scores, contrast_pairs, None
