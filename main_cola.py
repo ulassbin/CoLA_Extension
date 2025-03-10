@@ -106,8 +106,7 @@ class Trainer:
       # Video Contrastive Learning
       vid_positives, vid_positives_indices = self.get_positives_video_distance(intra_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
       with torch.no_grad():
-          pseudo_labels, _, _  = net.forward_with_embeddings(vid_positives) # The issue here is vid_positives are 128 feature size not 2048
-                                                            # So we cant use it directly to feed it to the model. But that was a good try.
+          pseudo_labels, _, _, _, re_embeddings = net(vid_positives)
       #print('Embeddins {}, Positives {}, Negatives {}'.format(intra_embeddings.shape, positives.shape, negatives.shape))
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, pseudo_labels,
                              [data, all_embeddings[2], all_embeddings[3]])

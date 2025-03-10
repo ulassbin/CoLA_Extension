@@ -52,8 +52,8 @@ class CoLA(nn.Module):
         self.len_feature = cfg.FEATS_DIM
         self.num_classes = cfg.NUM_CLASSES
 
-        self.actionness_module = Actionness_Module(cfg.FEATS_DIM, cfg.NUM_CLASSES)
         self.projection_module = NearestNeighborContrastiveI3D(cfg.FEATS_DIM, cfg.PROJ_DIM)
+        self.actionness_module = Actionness_Module(cfg.PROJ_DIM, cfg.NUM_CLASSES)
 
         self.softmax = nn.Softmax(dim=1)
         self.softmax_2 = nn.Softmax(dim=2)
@@ -116,8 +116,9 @@ class CoLA(nn.Module):
         k_easy = num_segments // self.r_easy
         k_hard = num_segments // self.r_hard
 
-        embeddings, cas, actionness = self.actionness_module(x)
-        intra_embeddings, inter_embeddings, decoded_intra, decoded_inter = self.projection_module(embeddings)
+
+        intra_embeddings, inter_embeddings, decoded_intra, decoded_inter = self.projection_module(x)
+        embeddings, cas, actionness = self.actionness_module(intra_embeddings)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
         hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)
         
