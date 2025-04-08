@@ -106,7 +106,8 @@ class Trainer:
       # Video Contrastive Learning
       vid_positives, vid_positives_indices = self.get_positives_video_distance(intra_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
       with torch.no_grad():
-          pseudo_labels, _, _, _, re_embeddings = net(vid_positives)
+          #pseudo_labels, _, _, _, re_embeddings = net(vid_positives)
+          pseudo_labels, _, _ = net.forward_with_embeddings(vid_positives)
       #print('Embeddins {}, Positives {}, Negatives {}'.format(intra_embeddings.shape, positives.shape, negatives.shape))
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, pseudo_labels,
                              [data, all_embeddings[2], all_embeddings[3]])
@@ -209,9 +210,8 @@ def main():
                     'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' \
                     'Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                     step, cfg.PRETRAIN_NUM_ITERS, batch_time=batch_time, loss=losses)))
-    # How to free memory here?
-    del pre_train_loader
-    del loader_iter
+        del pre_train_loader
+        del loader_iter
     torch.cuda.empty_cache()
     print('=> pretraining done...')
     print('=> start training...')
@@ -271,7 +271,10 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
     final_res = {'method': '[CoLA] https://github.com/zhang-can/CoLA', 'results': {}}
     
     acc = AverageMeter()
-
+    num_proposals = 0
+    num_nms_proposals = 0
+    num_vids = len(test_loader)
+    all_proposals = {}
     for data, label, _, vid, vid_num_seg in test_loader:
         data, label = data.cuda(), label.cuda()
         vid_num_seg = vid_num_seg[0].cpu().item()
@@ -292,10 +295,13 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
         cas_pred = utils.get_pred_activations(cas, pred, cfg)
         aness_pred = utils.get_pred_activations(actionness, pred, cfg)
         proposal_dict = utils.get_proposal_dict(cas_pred, aness_pred, pred, score_np, vid_num_seg, cfg)
-
+        num_proposals += sum([len(v) for v in proposal_dict.values()])
         final_proposals = [utils.nms(v, cfg.NMS_THRESH) for _,v in proposal_dict.items()]
+        num_nms_proposals += sum([len(v) for v in final_proposals])
         final_res['results'][vid[0]] = utils.result2json(final_proposals, cfg.CLASS_DICT)
-
+        for class_id, proposals in enumerate(final_proposals):
+            for m in range(len(proposals)):  # proposals are list of list
+                all_proposals[class_id] = all_proposals.get(class_id, []) + [proposals[m]]
     json_path = os.path.join(cfg.OUTPUT_PATH, 'result.json')
     json.dump(final_res, open(json_path, 'w'))
     
@@ -304,9 +310,22 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
                                 verbose=False, check_status=False)
     mAP, average_mAP = anet_detection.evaluate()
 
+    # calculate average duration
+    avg_duration = 0
+    prop_count = 0
+    for class_id, proposals in all_proposals.items():
+        prop_count += len(proposals)
+        avg_duration += np.sum([p[3] - p[2] for p in proposals])
+    avg_duration /= prop_count
+
     if writter:
         writter.add_scalar('Test Performance/Accuracy', acc.avg, step)
         writter.add_scalar('Test Performance/mAP@AVG', average_mAP, step)
+        writter.add_scalar('Proposal Analysis/Pre_Proposals', num_proposals, step)
+        writter.add_scalar('Proposal Analysis/NMS_Proposals', num_nms_proposals,step)
+        if(num_vids != 0):
+            writter.add_scalar('Proposal Analysis/Proposals_Per_Video', num_nms_proposals/num_vids,step)
+            writter.add_scalar('Proposal Analysis/Average_Proposal_Duration',avg_duration,step)
         for i in range(cfg.TIOU_THRESH.shape[0]):
             writter.add_scalar('mAP@tIOU/mAP@{:.1f}'.format(cfg.TIOU_THRESH[i]), mAP[i], step)
 
