@@ -23,6 +23,7 @@ from eval.eval_detection import ANETdetection
 from terminaltables import AsciiTable
 
 from NCELoss.NNIICLUV_Tests.custom_queue import Queue
+from NCELoss.NNIICLUV_Tests.loss import KLDivLoss
 
 
 class Trainer:
@@ -38,16 +39,19 @@ class Trainer:
       self.initialized = True
       return
 
-  def get_positives_video_distance(self, full_embeddings, temporal, embedding_dim, debug=False):
+
+  def get_positives_video_distance(self, full_embeddings, vid_names, temporal, embedding_dim, k=1, debug=False):
       # In this function we will get the positives by using fft based distance calculation
       batch_size, temporal, embedding_dim = full_embeddings.shape
       polled_vids = batch_size
-      vid_embeddings, vid_indices = self.queue.find_nearest_vids(full_embeddings)# Implement this
-      #if vid_labels is not None:
-      #    vid_labels = vid_labels.reshape(batch_size, 3)
-      return vid_embeddings, vid_indices#, vid_labels
-  
-  
+      distances, vid_indices, shifts, prev_samples = self.queue.find_nearest_vids(full_embeddings, vid_names, self.config.sampled_vid_num)
+      vid_embeddings = self.queue.getVidDataBatched(vid_indices)
+      extra_data = self.queue.getVidDataBatchedFromPrevious(prev_samples)
+      print(f'Prev Samples {len(prev_samples)}, extra_data {len(extra_data)}')
+      return vid_embeddings, vid_indices, distances, shifts, prev_samples, extra_data
+    
+
+
   def get_positives(self, intra_embeddings, temporal, embedding_dim, debug=False): # In future get K input
     batch_size, temporal, embedding_dim = intra_embeddings.shape
     intra_embeddings = intra_embeddings.reshape(batch_size * temporal, embedding_dim)
@@ -66,6 +70,22 @@ class Trainer:
       sampled = embeddings[torch.arange(batch_size).unsqueeze(1), sample_indexes]
       return sampled  # Keeps gradients
 
+  def get_topk(self, cas):
+      k_targets = cas.shape[1] // 8 # self.config.num_segments // 8
+      _, topk_indices = torch.topk(cas, k_targets, dim=1)
+      # _, topk_indices1 = torch.topk(combined_cas, r, dim=1)
+      cas_top = torch.mean(torch.gather(cas, 1, topk_indices), dim=1)
+      return cas_top, topk_indices
+
+  def forward_pass_with_k_embeddings(self, topk_indices, distances):
+      cas_targets = self.queue.get_fused_cas_targets(self.net, topk_indices, distances)
+      cas_top, topk_action_indices = self.get_topk(cas_targets)
+      return cas_top, cas_targets
+
+  def forward_pass_with_k_embeddings2(self, topk_indices, distances, shifts, prev_data):
+      cas_targets = self.queue.get_fused_cas_targets2(self.net, topk_indices, distances, shifts, prev_data)
+      cas_top, topk_action_indices = self.get_topk(cas_targets)
+      return cas_top, cas_targets
 
   def pretrain_encoder_decoder_step(self, net, loader_iter, optimizer, criterion, writer, step):
       net.train()
@@ -73,48 +93,67 @@ class Trainer:
       data = data.cuda()
       label = label.cuda()
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
       criterion = LatentLoss()
+      kl_criterion = KLDivLoss()
       decoded_inter = all_embeddings[2]
       decoded_intra = all_embeddings[3]
-      cost = cfg.LATENT_LOSS_PRE * (criterion(data, decoded_inter) + criterion(data, decoded_intra))/2.0
+      pre_intra = criterion(data, decoded_intra)
+      pre_inter = criterion(data, decoded_inter)
+      cost = cfg.LATENT_LOSS_PRE * (pre_intra + pre_inter) / 2.0
+      batch, time, feats = intra_params[0].shape
+      # Reshape intra_params and inter_params to match the expected dimensions
+      kldiv_intra = kl_criterion(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
+      kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
+      cost += cfg.KLDIV_LOSS * (kldiv_intra + kldiv_inter) / 2.0
       cost.backward()
       optimizer.step()
-      writer.add_scalar('PRE_Latent Loss', cost.cpu().item(), step)
+      self.writter.add_scalar('Pretrain/Latent_intra', pre_intra.cpu().item(), step)
+      self.writter.add_scalar('Pretrain/Latent_inter', pre_inter.cpu().item(), step)
+      self.writter.add_scalar('Pretrain/Kldiv_intra', kldiv_intra.cpu().item(), step)
+      self.writter.add_scalar('Pretrain/Kldiv_inter', kldiv_inter.cpu().item(), step)
       return cost
-
+  
   def train_one_step(self, net, loader_iter, optimizer, criterion, writter, step):
       net.train()
       
-      data, label, _, _, _ = next(loader_iter)
+      data, label, temp_anno, vid_names, _ = next(loader_iter)
       data = data.cuda()
       label = label.cuda()
 
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
       # all_embbeddings are [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
       # Sample intra_embeddings
       intra_embeddings = all_embeddings[0]
-      embedding_targets = self.sample_embeddings(intra_embeddings)
+      inter_embeddings = all_embeddings[1]
+      combined_embeddings = (all_embeddings[0] + all_embeddings[1]) / 2.0
+      embedding_targets = self.sample_embeddings(combined_embeddings)
       #print('Embedding Targets {}, Intra Embeddings {}'.format(embedding_targets.shape, intra_embeddings.shape))
 
       if not self.initialized:
           self.initialize(embedding_targets)
       # Snippet Contrastive Learning
-      positive_indices, positives, positive_labels = self.get_positives(embedding_targets, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
+      positive_indices, positives, positive_labels = self.get_positives(embedding_targets, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM)
       negatives, negative_indexes = self.queue.getNegatives(positive_indices)
       # Video Contrastive Learning
-      vid_positives, vid_positives_indices = self.get_positives_video_distance(intra_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
+      vid_positives, vid_positives_indices, distances, shifts, prev_samples, prev_data  = self.get_positives_video_distance(combined_embeddings, vid_names, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM, self.cfg.FFT_K)
       with torch.no_grad():
-          #pseudo_labels, _, _, _, re_embeddings = net(vid_positives)
-          pseudo_labels, _, _ = net.forward_with_embeddings(vid_positives)
-      #print('Embeddins {}, Positives {}, Negatives {}'.format(intra_embeddings.shape, positives.shape, negatives.shape))
-      cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, pseudo_labels,
-                             [data, all_embeddings[2], all_embeddings[3]])
+          if self.cfg.FFT_K <= 1:
+              cas_top_pseudo, _, _ = net.forward_with_embeddings(vid_positives)
+          else:
+              if(prev_data is not None):
+                  cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings2(vid_positives_indices, distances, shifts, prev_data)
+              else:
+                  cas_top_pseudo, cas_pseudo = self.forward_with_embeddings(vid_positives_indices, distances)
+
+
+      cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, cas_top_pseudo,
+                             [data, all_embeddings[2], all_embeddings[3]], intra_params, inter_params)
       
       cost.backward()
       optimizer.step()
-      self.queue.enqueue(intra_embeddings)
+      self.queue.enqueue(combined_embeddings)
       for key in loss.keys():
           writter.add_scalar(key, loss[key].cpu().item(), step)
       return cost
@@ -261,7 +300,7 @@ def main():
 
 @torch.no_grad()
 def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=None):
-    net.eval()
+    net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
 
     if model_file:
         print('=> loading model: {}'.format(model_file))
@@ -279,7 +318,7 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
         data, label = data.cuda(), label.cuda()
         vid_num_seg = vid_num_seg[0].cpu().item()
 
-        video_scores, _, actionness, cas, all_embeddings = net(data) # No use for embeddings here.
+        video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = net(data) # No use for embeddings here.
 
         label_np = label.cpu().data.numpy()
         score_np = video_scores[0].cpu().data.numpy()

@@ -5,6 +5,7 @@ import copy
 import random
 import numpy as np
 from NCELoss.NNIICLUV_Tests.vid_fft import torch_fft
+from collections import defaultdict
 
 class Queue():
     def __init__(self, queue_size=65536, embedding_dim=128, device='cuda'):
@@ -14,6 +15,9 @@ class Queue():
         self.queue = torch.zeros((queue_size, embedding_dim)).to(device)  # Initialize with zeros
         self.label_queue = torch.zeros((queue_size, 3), dtype=int).to(device) # vid_id, class_id, epoch_id
         self.vid_queue = []
+        self.vid_names = []  # List to store video names
+        self.distances = defaultdict(dict)  # Store distances for each video
+        self.shifts = defaultdict(dict)
         self.ptr = 0  # Pointer to track enqueueing position
         self.overflown = False
 
@@ -45,17 +49,18 @@ class Queue():
             negative_embeddings[i][j] = self.queue[q_ids] # Get the embeddings
           return negative_embeddings.to(self.device), negative_indexes.to(self.device)
 
-    def append(self, embeddings, labels=None):
+    def append(self, embeddings, vid_names, labels=None):
       batch_size, t, feature_dim = embeddings.shape # Assuming fixed t
       num_snips = batch_size*t
       if labels is not None:
         labels = labels.reshape(-1,3)
         self.label_queue[self.ptr:self.ptr + num_snips] = copy.deepcopy(labels)
-
+      #print(f'Num_snips {num_snips}, embed_len {len(embeddings.reshape(-1,feature_dim))}')
       self.queue[self.ptr:self.ptr + num_snips] = copy.deepcopy(embeddings.reshape(-1,feature_dim).detach())
       for i in range(batch_size):
         indexes = torch.arange(self.ptr + i*t, self.ptr + i*t + t)
         self.vid_queue.append(torch.tensor(indexes, dtype=int))
+        self.vid_names.append(vid_names[i])  # Store video names
       
       if(not self.overflown and self.ptr + num_snips >= self.queue_size):
         self.overflown = True
@@ -78,6 +83,7 @@ class Queue():
               self.vid_queue[i] = valid
         for i in sorted(del_indexes, reverse=True):
             del self.vid_queue[i]
+            del self.vid_names[i]
         self.ptr -= amount
 
     def reshape_labels(self, labels, t):
@@ -85,16 +91,16 @@ class Queue():
             return None
         return labels.reshape(-1,1,3).repeat(1, t, 1)
 
-    def enqueue(self, embeddings, labels=None):
+    def enqueue(self, embeddings, vid_names, labels=None):
         batch_size, temporal, feature_dim = embeddings.shape
         labels = self.reshape_labels(labels, temporal)
         num_items = batch_size * temporal
         if self.ptr + num_items > self.queue_size:
             overflow = (self.ptr + num_items) - self.queue_size
             self.shift(overflow) # shift the queue
-            self.append(embeddings, labels)
+            self.append(embeddings, vid_names, labels)
         else:
-          self.append(embeddings, labels)
+          self.append(embeddings, vid_names, labels)
 
     def find_nearest_neighbors(self, query_embeddings):
       query_norm = F.normalize(query_embeddings, dim=1)
@@ -139,20 +145,157 @@ class Queue():
             padded_vid_data.append(torch.cat((vid_data, padding), dim=0))
         return torch.stack(padded_vid_data, dim=0)
 
-    def find_nearest_vids(self, full_embeddings, max_samples=20):
+    def getVidDataBatched(self, indices):
+        # Indices is of shape (batch, top_k)
+        max_length = max([len(self.vid_queue[i]) for i in indices.flatten()])
+        # Skipping padding
+        all_vid_data = []
+        for b in indices:
+            padded_vid_data = []
+            for top_k in b:
+                vid_data = self.queue[self.vid_queue[top_k]]
+                padding = torch.zeros((max_length - vid_data.shape[0], self.embedding_dim), device=self.device)
+                #print('Vid data {} shape: '.format(top_k), vid_data.shape)
+                padded_vid_data.append(torch.cat((padding, vid_data), dim=0))
+            all_vid_data.append(torch.stack(padded_vid_data, dim=0))
+        final_tensor = torch.stack(all_vid_data, dim=0)
+        #print('Final tensor shape: ', final_tensor.shape)
+        return final_tensor  # Now all_vid_data should be of shape (batch, top_k, max_length, feature_dim)
+
+    def getFromPreviousDistances(self, vid_names, top_k=5):
+        # This function is used to get the nearest videos from the previous distances
+        # append to queued_vid_targets
+        #print('Len vid names: ', len(vid_names))
+        indices = {f'{item}':[] for item in vid_names}
+        if len(self.distances) == 0 or len(vid_names) == 0:
+            print(f'Cant get prev distances REASON: Self dist {len(self.distances)}, vid_names: {len(vid_names)}')
+            return indices
+        else:
+            for i, vid_name in enumerate(vid_names):
+                distance_list = self.distances.get(vid_name, {}) # this returns a dictionary
+                shift_list = self.shifts.get(vid_name, {})
+                vals = []
+                keys = []
+                for name, distance in distance_list.items():
+                    vals.append(distance)
+                    keys.append(name)
+                if len(vals) > 0:
+                    sorted_indices = np.argsort(vals)[:top_k]
+                    indices['{}'.format(vid_name)] = [[keys[i], vals[i], shift_list[keys[i]]]for i in sorted_indices]
+                    #indices['{}'.format(keys[i])] = [[vid_name, vals[i], -shift_list[keys[i]] for i in sorted_indices] # The other way around as well also works!
+        return indices # format is {'vid_name': [[vid_name, distance], ...], ...}
+
+    def getVidDataBatchedFromPrevious(self, indices):
+       data = [] # It is going to be a list of tensors, first dimension is batch, second is top_k
+                 # indices are of shape sourcex[[target_vid_name, distance, shift], [target2, dist2, shift2]...]
+       #if indices == None:
+       #    return data
+       for vid_name, target_vids in indices.items():
+           padded_vid_data = []
+           # get index from self.vid_names
+           for target_vid, distance, shift in target_vids:
+               if target_vid in self.vid_names:
+                   vid_index = self.vid_names.index(target_vid)
+                   vid_data = self.queue[self.vid_queue[vid_index]]
+                   padded_vid_data.append([vid_data, distance, shift])
+               else:
+                   print('Target video {} not found in vid_names {}'.format(target_vid, len(self.vid_names)))
+           print(f'{vid_name} padded vid data {len(padded_vid_data)}')
+           data.append(copy.deepcopy(padded_vid_data))
+       # Now data is a list of lists, where each inner list contains [vid_data, distance]
+       return data
+
+    def find_nearest_vids(self, full_embeddings, vid_names, max_samples=20, max_k=5, random_ratio=0.5):
         # We have vids stored in a list called vid_queue
         num_vids = len(self.vid_queue) # How many unique videos we have
         if(num_vids == 0):
             print('Vid queue is currently empty')
-            return None, None
-        vid_indices = self.getVidIndices(max_samples)
+            return None, None, None
+        
+        prev_distance_samples = self.getFromPreviousDistances(vid_names)
+        vid_indices = self.getVidIndices(max_samples).to('cuda')
+        target_names = [self.vid_names[i] for i in vid_indices.cpu().numpy()]
+        # Else just use random indices    
         queued_vid_targets = self.getVidData(vid_indices)
         #print('Target vids shape: ', queued_vid_targets.shape)
         #print('Full embeddings shape: ', full_embeddings.shape)
-        distances = torch_fft.fft_distance_2d_batch(full_embeddings, queued_vid_targets) # This might cause memory issues, might need to partition into smaller chunks later.
-        closest = distances.argmin(dim=1).cpu().numpy()
-        return queued_vid_targets[closest], vid_indices[closest]
-       
+        distances, shift_indices = torch_fft.fft_distance_2d_batch(full_embeddings, queued_vid_targets) # This might cause memory issues, might need to partition into smaller chunks later.
+        # Lets sort the distances and get the sorted indices
+        # Distances should be of shape (batch_size, num_vids)
+        # We have to store them:
+        for i in range(distances.shape[0]):
+            for j in range(distances.shape[1]): # Store shifts and distances directly to the memory!
+                self.distances[vid_names[i]][target_names[j]] = distances[i][j].detach().cpu().item()
+                self.shifts[vid_names[i]][target_names[j]] = shift_indices[i][j].detach().cpu().item()
+        # q: how to sort the distances and get the indices?
+        topk_vals, topk_indices = torch.topk(distances, max_k, dim=1, largest=False) # Gets the closest since largest=false
+        topk_shifts = torch.gather(shift_indices, dim=1, index=topk_indices)  # shape: [B, K]
+        topk_vid_indices = torch.zeros((full_embeddings.shape[0], max_k), dtype=int, device=full_embeddings.device)
+        #topk_vid_indices = torch.gather(vid_indices, dim=1, topk_indices).to('cuda')
+        for i in range(topk_indices.shape[0]):
+            for j in range(topk_indices.shape[1]):
+                topk_vid_indices[i][j] = vid_indices[[topk_indices[i][j]]]
+        #topk_vid_indices = vid_indices.to('cuda')[topk_indices]
+        return topk_vals, topk_vid_indices, topk_shifts, prev_distance_samples
+
+    def cas_fusion(self, cas_tensor, weights=None):
+        # where cas is examplextemporalxclasses
+        # weights is examplextemporal
+        if weights is None:
+           weights = torch.ones(cas_tensor.shape[0], cas_tensor.shape[1], device=cas_tensor.device)
+        # Normalize weights
+        weights = 1/weights # Since these are not weights but distances!
+        weights = F.softmax(weights, dim=0)
+        # Expand weights to match the feature dimension
+        weights = weights.view(weights.shape[0], 1, 1)
+        # Perform weighted sum
+        weighted_sum = torch.sum(cas_tensor * weights, dim=0)
+        # resultant should be 1xtemporalxclasses
+        return weighted_sum
+    
+    def get_fused_cas_targets(self, model, indices, weights):
+        # indices: (batch, top_k)
+        # weights: (batch, top_k)
+        fused_cas_list = []
+        vid_targets = self.getVidDataBatched(indices)  # shape: (batch, top_k, T, feature)
+        for i in range(indices.shape[0]):
+            cas_targets = model.forward_with_embeddings(vid_targets[i])
+            fused_cas = self.cas_fusion(cas_targets, weights[i])  # shape: (T, num_classes)
+            fused_cas_list.append(fused_cas)
+
+        # Stack to shape: (batch, T, num_classes)
+        return torch.stack(fused_cas_list, dim=0)
+
+    def get_fused_cas_targets2(self, model, indices, weights, shiftz, prev_data):
+        # indices: (batch, top_k)
+        # weights: (batch, top_k)
+        fused_cas_list = []
+        vid_targets = self.getVidDataBatched(indices)  # shape: (batch, top_k, T, feature)
+        #print(f'Batch {indices.shape[0]}, Data {len(prev_data)}') 
+        for i in range(indices.shape[0]):
+            similar_vids = vid_targets[i] # from random sampling
+            similar_weights = weights[i]
+            # roll vids
+            for j in range(similar_vids.shape[0]):
+                #print(f'Shifting amount {shiftz[i][j]}')
+                similar_vids[j] = torch.roll(similar_vids[j],shifts=-int(shiftz[i][j]), dims=0) # roll to shift
+            #print(f'Base_Vid {i} Weights {len(weights[i])}, Prev_data {len(prev_data[i])}')
+            for j in range(len(prev_data[i])): # from similar previous distances
+                prev_data_item = prev_data[i][j]
+                #print(f'Base_vid {similar_vids.shape}, {prev_data_item[0].shape}')
+                pad_len = similar_vids.shape[1] - prev_data_item[0].shape[0]
+                if(pad_len > 0):
+                    # pad beginning part!
+                    pad_tensor = torch.zeros((pad_len, prev_data_item[0].shape[1]), device=prev_data_item[0].device)
+                    prev_data_item[0] = torch.roll(torch.cat([pad_tensor, prev_data_item[0]],dim=0), shifts=-int(prev_data_item[2]), dims=0) # Roll to shift 
+                similar_vids = torch.cat((similar_vids, prev_data_item[0].unsqueeze(0)), dim=0) # appends the video itself
+                similar_weights = torch.cat((similar_weights, torch.tensor([prev_data_item[1]], device=similar_weights.device)), dim=0) # appends the distance
+            cas_targets = model.forward_with_embeddings(similar_vids)
+            fused_cas = self.cas_fusion(cas_targets, similar_weights)  # shape: (T, num_classes)
+            fused_cas_list.append(fused_cas)
+
+        # Stack to shape: (batch, T, num_classes)
+        return torch.stack(fused_cas_list, dim=0)
 
     def get_queue_without_indices(self, indices):
         mask = torch.ones(self.queue_size, dtype=bool)

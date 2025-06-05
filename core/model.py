@@ -116,8 +116,7 @@ class CoLA(nn.Module):
         k_easy = num_segments // self.r_easy
         k_hard = num_segments // self.r_hard
 
-
-        intra_embeddings, inter_embeddings, decoded_intra, decoded_inter = self.projection_module(x)
+        intra_embeddings, inter_embeddings, decoded_inter, decoded_intra, intra_params, inter_params = self.projection_module(x)
         #print('Intra embeddings shape ', intra_embeddings.shape)
         embeddings, cas, actionness = self.actionness_module(intra_embeddings)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
@@ -131,7 +130,7 @@ class CoLA(nn.Module):
             'HA': hard_act,
             'HB': hard_bkg
         }
-        return video_scores, contrast_pairs, actionness, cas, [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
+        return video_scores, contrast_pairs, actionness, cas, [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra], intra_params, inter_params
 
     def forward_with_embeddings(self, latent_embeddings):
         num_segments = latent_embeddings.shape[1]

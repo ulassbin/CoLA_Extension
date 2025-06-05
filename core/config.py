@@ -17,9 +17,10 @@ cfg.SAMPLING_RATE = 0.2
 cfg.LOG_PATH = '/abyss/home/forked_CoLa/CoLA_Extension/experiments/'
 # Video Distance Specific Paramaters
 cfg.PSEUDO_WEIGHT = 10.0 #1.0 #%10 of action loss atm. # Keep it low...
-
+cfg.FFT_K = 10 # Number of nearest neighbors to consider in the frequency domain
 # Latent train in between
 cfg.LATENT_TRAIN_BETWEEN = True
+cfg.KLDIV_LOSS = 1.0 # KL Divergence loss weight
 
 # Latent Representation parameters
 cfg.LATENT_LOSS_WEIGHT = 10 # Really force latent representation to be similar

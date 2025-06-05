@@ -6,7 +6,7 @@
 import torch
 import torch.nn as nn
 
-from NCELoss.NNIICLUV_Tests.loss import InfoNCELoss
+from NCELoss.NNIICLUV_Tests.loss import InfoNCELoss, KLDivLoss
 
 class ActionLoss(nn.Module):
     def __init__(self):
@@ -83,22 +83,32 @@ class TotalLoss(nn.Module):
         self.nce_criterion = InfoNCELoss()
         self.vid_pseudo_loss = VidPseudoLoss()
         self.latent_loss = LatentLoss()
+        self.kldiv_loss = KLDivLoss()
         self.nce_weight = cfg.NCE_WEIGHT
         self.pseudo_weight = cfg.PSEUDO_WEIGHT
         self.latent_weight = cfg.LATENT_LOSS_WEIGHT
+        self.kldiv_weight = cfg.KLDIV_LOSS
 
 
-    def forward(self, video_scores, label, contrast_pairs, sampled_embeddings, positives, negatives, pseudo_label, enc_decoder_embeddings):
+    def forward(self, video_scores, label, contrast_pairs, sampled_embeddings, positives, negatives, pseudo_video_scores, enc_decoder_embeddings, intra_params, inter_params):
         input_feature, decoded_inter, decoded_intra = enc_decoder_embeddings
-        loss_cls = self.action_criterion(video_scores, label)
-        loss_snico = self.snico_criterion(contrast_pairs)
+        loss_cls = self.action_criterion(video_scores, label) # Classification Loss
+        loss_snico = self.snico_criterion(contrast_pairs) # CoLa Contrastive Loss
         loss_nce = self.nce_criterion(sampled_embeddings, positives, negatives)
-        loss_pseudo = self.vid_pseudo_loss(video_scores, pseudo_label)
+        loss_pseudo = self.vid_pseudo_loss(video_scores, pseudo_video_scores) # Video Pseudo Label Loss
         loss_latent_inter = self.latent_loss(input_feature, decoded_inter)
         loss_latent_intra = self.latent_loss(input_feature, decoded_intra)
-        loss_total = loss_cls + 0.01 * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
+        batch, time, feats = intra_params[0].shape
+        # Reshape intra_params and inter_params to match the expected dimensions
+        kldiv_intra = self.kldiv_loss(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
+        kldiv_inter = self.kldiv_loss(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
         
-        loss_total += self.latent_weight *(loss_latent_inter + loss_latent_intra)
+        loss_total = loss_cls + 0.01 * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
+
+        
+        
+        loss_total += self.latent_weight * (loss_latent_inter + loss_latent_intra)
+        loss_total += self.kldiv_weight * (kldiv_intra + kldiv_inter) / 2.0
 
         loss_dict = {
             'Loss/Total': loss_total,
@@ -108,7 +118,8 @@ class TotalLoss(nn.Module):
             'Loss/Pseudo': loss_pseudo,
             'Loss/LatentInter': loss_latent_inter,
             'Loss/LatentIntra': loss_latent_intra,
-            'Loss/LatentCombined': loss_latent_inter + loss_latent_intra
+            'Loss/KLDivIntra': kldiv_intra,
+            'Loss/KLDivInter': kldiv_inter
         }
 
         return loss_total, loss_dict
