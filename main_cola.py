@@ -159,18 +159,17 @@ class Trainer:
           writter.add_scalar(key, loss[key].cpu().item(), step)
       return cost
 
-
-  @torch.no_grad()                                                      
-  def test_all(self, cfg, test_loader, test_info, step, writter=None, model_file=None):                        
+  @torch.no_grad()
+  def test_all(self, cfg, test_loader, test_info, step, writter=None, model_file=None):
       self.net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
-                                                                                         
-      if model_file:                                                 
-          print('=> loading model: {}'.format(model_file))                                 
-          self.net.load_state_dict(torch.load(model_file))           
-          print('=> tesing model...')                                      
-                                                                                          
-      final_res = {'method': '[CoLA] https://github.com/zhang-can/CoLA', 'results': {}}
 
+      if model_file:
+          print('=> loading model: {}'.format(model_file))
+          self.net.load_state_dict(torch.load(model_file))
+          print('=> tesing model...')
+
+      final_res = {'method': '[CoLA] https://github.com/zhang-can/CoLA', 'results': {}}
+      
       acc = AverageMeter()
       num_proposals = 0
       num_nms_proposals = 0
@@ -184,14 +183,15 @@ class Trainer:
 
           label_np = label.cpu().data.numpy()
           score_np = video_scores[0].cpu().data.numpy()
-
+          
           pred_np = np.where(score_np < cfg.CLASS_THRESH, 0, 1)
           correct_pred = np.sum(label_np == pred_np, axis=1)
           acc.update(float(np.sum((correct_pred == cfg.NUM_CLASSES))), correct_pred.shape[0])
+
           pred = np.where(score_np >= cfg.CLASS_THRESH)[0]
           if len(pred) == 0:
               pred = np.array([np.argmax(score_np)])
-
+          
           cas_pred = utils.get_pred_activations(cas, pred, cfg)
           aness_pred = utils.get_pred_activations(actionness, pred, cfg)
           proposal_dict = utils.get_proposal_dict(cas_pred, aness_pred, pred, score_np, vid_num_seg, cfg)
@@ -204,10 +204,10 @@ class Trainer:
                   all_proposals[class_id] = all_proposals.get(class_id, []) + [proposals[m]]
       json_path = os.path.join(cfg.OUTPUT_PATH, 'result.json')
       json.dump(final_res, open(json_path, 'w'))
-
+      
       anet_detection = ANETdetection(cfg.GT_PATH, json_path,
-                                subset='test', tiou_thresholds=cfg.TIOU_THRESH,
-                                verbose=False, check_status=False)
+                                  subset='test', tiou_thresholds=cfg.TIOU_THRESH,
+                                  verbose=False, check_status=False)
       mAP, average_mAP = anet_detection.evaluate()
 
       # calculate average duration
@@ -236,9 +236,6 @@ class Trainer:
       for i in range(cfg.TIOU_THRESH.shape[0]):
           test_info["mAP@{:.1f}".format(cfg.TIOU_THRESH[i])].append(mAP[i])
       return test_info['mAP@0.5'][-1], average_mAP
-
-
-
 
 def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.GPU_ID
@@ -380,83 +377,6 @@ def main():
 
     print(utils.table_format(best_test_info, cfg.TIOU_THRESH, '[CoLA] THUMOS\'14 Performance'))
 
-@torch.no_grad()
-def test_all(cfg, test_loader, test_info, step, writter=None, model_file=None):
-    self.net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
-
-    if model_file:
-        print('=> loading model: {}'.format(model_file))
-        net.load_state_dict(torch.load(model_file))
-        print('=> tesing model...')
-
-    final_res = {'method': '[CoLA] https://github.com/zhang-can/CoLA', 'results': {}}
-    
-    acc = AverageMeter()
-    num_proposals = 0
-    num_nms_proposals = 0
-    num_vids = len(test_loader)
-    all_proposals = {}
-    for data, label, _, vid, vid_num_seg in test_loader:
-        data, label = data.cuda(), label.cuda()
-        vid_num_seg = vid_num_seg[0].cpu().item()
-
-        video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = self.net(data) # No use for embeddings here.
-
-        label_np = label.cpu().data.numpy()
-        score_np = video_scores[0].cpu().data.numpy()
-        
-        pred_np = np.where(score_np < cfg.CLASS_THRESH, 0, 1)
-        correct_pred = np.sum(label_np == pred_np, axis=1)
-        acc.update(float(np.sum((correct_pred == cfg.NUM_CLASSES))), correct_pred.shape[0])
-
-        pred = np.where(score_np >= cfg.CLASS_THRESH)[0]
-        if len(pred) == 0:
-            pred = np.array([np.argmax(score_np)])
-        
-        cas_pred = utils.get_pred_activations(cas, pred, cfg)
-        aness_pred = utils.get_pred_activations(actionness, pred, cfg)
-        proposal_dict = utils.get_proposal_dict(cas_pred, aness_pred, pred, score_np, vid_num_seg, cfg)
-        num_proposals += sum([len(v) for v in proposal_dict.values()])
-        final_proposals = [utils.nms(v, cfg.NMS_THRESH) for _,v in proposal_dict.items()]
-        num_nms_proposals += sum([len(v) for v in final_proposals])
-        final_res['results'][vid[0]] = utils.result2json(final_proposals, cfg.CLASS_DICT)
-        for class_id, proposals in enumerate(final_proposals):
-            for m in range(len(proposals)):  # proposals are list of list
-                all_proposals[class_id] = all_proposals.get(class_id, []) + [proposals[m]]
-    json_path = os.path.join(cfg.OUTPUT_PATH, 'result.json')
-    json.dump(final_res, open(json_path, 'w'))
-    
-    anet_detection = ANETdetection(cfg.GT_PATH, json_path,
-                                subset='test', tiou_thresholds=cfg.TIOU_THRESH,
-                                verbose=False, check_status=False)
-    mAP, average_mAP = anet_detection.evaluate()
-
-    # calculate average duration
-    avg_duration = 0
-    prop_count = 0
-    for class_id, proposals in all_proposals.items():
-        prop_count += len(proposals)
-        avg_duration += np.sum([p[3] - p[2] for p in proposals])
-    avg_duration /= prop_count
-
-    if writter:
-        writter.add_scalar('Test Performance/Accuracy', acc.avg, step)
-        writter.add_scalar('Test Performance/mAP@AVG', average_mAP, step)
-        writter.add_scalar('Proposal Analysis/Pre_Proposals', num_proposals, step)
-        writter.add_scalar('Proposal Analysis/NMS_Proposals', num_nms_proposals,step)
-        if(num_vids != 0):
-            writter.add_scalar('Proposal Analysis/Proposals_Per_Video', num_nms_proposals/num_vids,step)
-            writter.add_scalar('Proposal Analysis/Average_Proposal_Duration',avg_duration,step)
-        for i in range(cfg.TIOU_THRESH.shape[0]):
-            writter.add_scalar('mAP@tIOU/mAP@{:.1f}'.format(cfg.TIOU_THRESH[i]), mAP[i], step)
-
-    test_info["step"].append(step)
-    test_info["test_acc"].append(acc.avg)
-    test_info["average_mAP"].append(average_mAP)
-
-    for i in range(cfg.TIOU_THRESH.shape[0]):
-        test_info["mAP@{:.1f}".format(cfg.TIOU_THRESH[i])].append(mAP[i])
-    return test_info['mAP@0.5'][-1], average_mAP
 
 if __name__ == "__main__":
     assert len(sys.argv)>=2 and sys.argv[1] in ['train', 'test'], 'Please set mode (choices: [train] or [test])'
