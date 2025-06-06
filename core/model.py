@@ -118,7 +118,8 @@ class CoLA(nn.Module):
 
         intra_embeddings, inter_embeddings, decoded_inter, decoded_intra, intra_params, inter_params = self.projection_module(x)
         #print('Intra embeddings shape ', intra_embeddings.shape)
-        embeddings, cas, actionness = self.actionness_module(intra_embeddings)
+        combined_embeddings = (intra_embeddings + inter_embeddings) / 2.0
+        embeddings, cas, actionness = self.actionness_module(combined_embeddings)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
         hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)
         
@@ -136,13 +137,13 @@ class CoLA(nn.Module):
         num_segments = latent_embeddings.shape[1]
         k_easy = num_segments // self.r_easy
         k_hard = num_segments // self.r_hard
-        print('Latent Embeddings shape ', latent_embeddings.shape)
+        #print('Latent Embeddings shape ', latent_embeddings.shape)
         #decoded_inter, decoded_intra = self.projection_module.from_latent_space(latent_embeddings) # In future this should handle both intra and inter embeddings.
         #embeddings = (decoded_inter + decoded_intra)/2 # Just combine encodings.
         #print('Decoded Inter Shape:', decoded_inter.shape, 'Decoded Intra Shape:', decoded_intra.shape, 'Embeddings Shape:', embeddings.shape)
         embeddings, cas, actionness = self.actionness_module.forward(latent_embeddings) 
         #intra_embeddings, inter_embeddings = self.projection_module(embeddings)
-        print('Out embeddings shape ', embeddings.shape)
+        #print('Out embeddings shape ', embeddings.shape)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
         hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)
         
@@ -153,4 +154,4 @@ class CoLA(nn.Module):
             'HB': hard_bkg
         }
         video_scores = self.get_video_cls_scores(cas, k_easy)
-        return video_scores, contrast_pairs, None
+        return video_scores

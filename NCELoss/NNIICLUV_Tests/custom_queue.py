@@ -249,6 +249,7 @@ class Queue():
         # Expand weights to match the feature dimension
         weights = weights.view(weights.shape[0], 1, 1)
         # Perform weighted sum
+        #print(f'cas {cas_tensor.shape} weights {weights.shape}')
         weighted_sum = torch.sum(cas_tensor * weights, dim=0)
         # resultant should be 1xtemporalxclasses
         return weighted_sum
@@ -291,9 +292,16 @@ class Queue():
                 similar_vids = torch.cat((similar_vids, prev_data_item[0].unsqueeze(0)), dim=0) # appends the video itself
                 similar_weights = torch.cat((similar_weights, torch.tensor([prev_data_item[1]], device=similar_weights.device)), dim=0) # appends the distance
             cas_targets = model.forward_with_embeddings(similar_vids)
+            #print(f'targets {cas_targets.shape}, weights {similar_weights.shape}')
             fused_cas = self.cas_fusion(cas_targets, similar_weights)  # shape: (T, num_classes)
             fused_cas_list.append(fused_cas)
 
+        max_T = max(fc.shape[0] for fc in fused_cas_list) # quickfix
+        for i in range(len(fused_cas_list)):
+            pad_T = max_T - fused_cas_list[i].shape[0]
+            if pad_T > 0:
+               pad_tensor = torch.zeros((pad_T, fused_cas_list[i].shape[1]), device=fused_cas_list[i].device)
+               fused_cas_list[i] = torch.cat([fused_cas_list[i], pad_tensor], dim=0)
         # Stack to shape: (batch, T, num_classes)
         return torch.stack(fused_cas_list, dim=0)
 

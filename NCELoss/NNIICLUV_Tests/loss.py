@@ -5,6 +5,49 @@ import copy
 import random
 
 
+#class LatentLossMasked(nn.Module):
+#    def __init__(self):
+#        super(LatentLossMasked, self).__init__()
+#        self.mse_criterion = nn.MSELoss(reduction='none')
+#        self.eps = 0.0001
+
+#    def forward(self, base_feature, decoded_feature):
+#        # Create a mask: 1 where decoded_feature ≠ 0, 0 where it is 
+#       mask = (decoded_feature != 0).float()
+        # Get MSE
+#        loss = self.mse_criterion(base_feature,decoded_feature)
+#        masked_loss = loss * mask
+#        normalized_loss = masked_loss.sum() / (mask.sum() + self.eps)
+#        return normalized_loss
+
+class LatentLossMasked(nn.Module):
+    def __init__(self):
+        super(LatentLossMasked, self).__init__()
+        self.mse_criterion = nn.MSELoss(reduction='none')
+        self.eps = 1e-6
+
+    def forward(self, base_feature, decoded_feature):
+        # Create a mask: 1 where decoded_feature ≠ 0, 0 where it is
+        mask = (decoded_feature != 0).float()
+
+        # Compute MSE loss without reduction
+        loss = self.mse_criterion(base_feature, decoded_feature)
+
+        # Apply mask
+        masked_loss = loss * mask
+
+        # Normalize safely
+        denom = mask.sum() + self.eps
+        normalized_loss = masked_loss.sum() / denom
+
+        # Final NaN/Inf guard
+        if torch.isnan(normalized_loss) or torch.isinf(normalized_loss):
+            return torch.tensor(0.0, device=base_feature.device)
+
+        return normalized_loss
+
+
+
 class KLDivLoss(nn.Module):
    def __init__(self):
       super().__init__()

@@ -29,13 +29,14 @@ from NCELoss.NNIICLUV_Tests.loss import KLDivLoss
 class Trainer:
   def __init__(self, cfg):
       self.cfg = cfg
+      self.net = CoLA(cfg)
       self.queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
       self.nn_queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
       self.initialized = False
 
-  def initialize(self, embeddings):
+  def initialize(self, embeddings, vid_names):
       print('Initializeing with ', embeddings.shape)
-      self.queue.enqueue(embeddings)
+      self.queue.enqueue(embeddings, vid_names)
       self.initialized = True
       return
 
@@ -44,7 +45,7 @@ class Trainer:
       # In this function we will get the positives by using fft based distance calculation
       batch_size, temporal, embedding_dim = full_embeddings.shape
       polled_vids = batch_size
-      distances, vid_indices, shifts, prev_samples = self.queue.find_nearest_vids(full_embeddings, vid_names, self.config.sampled_vid_num)
+      distances, vid_indices, shifts, prev_samples = self.queue.find_nearest_vids(full_embeddings, vid_names, self.cfg.sampled_vid_num)
       vid_embeddings = self.queue.getVidDataBatched(vid_indices)
       extra_data = self.queue.getVidDataBatchedFromPrevious(prev_samples)
       print(f'Prev Samples {len(prev_samples)}, extra_data {len(extra_data)}')
@@ -87,13 +88,13 @@ class Trainer:
       cas_top, topk_action_indices = self.get_topk(cas_targets)
       return cas_top, cas_targets
 
-  def pretrain_encoder_decoder_step(self, net, loader_iter, optimizer, criterion, writer, step):
-      net.train()
+  def pretrain_encoder_decoder_step(self, loader_iter, optimizer, criterion, writer, step):
+      self.net.train()
       data, label, _, _, _ = next(loader_iter)
       data = data.cuda()
       label = label.cuda()
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = self.net(data)
       criterion = LatentLoss()
       kl_criterion = KLDivLoss()
       decoded_inter = all_embeddings[2]
@@ -108,21 +109,21 @@ class Trainer:
       cost += cfg.KLDIV_LOSS * (kldiv_intra + kldiv_inter) / 2.0
       cost.backward()
       optimizer.step()
-      self.writter.add_scalar('Pretrain/Latent_intra', pre_intra.cpu().item(), step)
-      self.writter.add_scalar('Pretrain/Latent_inter', pre_inter.cpu().item(), step)
-      self.writter.add_scalar('Pretrain/Kldiv_intra', kldiv_intra.cpu().item(), step)
-      self.writter.add_scalar('Pretrain/Kldiv_inter', kldiv_inter.cpu().item(), step)
+      writer.add_scalar('Pretrain/Latent_intra', pre_intra.cpu().item(), step)
+      writer.add_scalar('Pretrain/Latent_inter', pre_inter.cpu().item(), step)
+      writer.add_scalar('Pretrain/Kldiv_intra', kldiv_intra.cpu().item(), step)
+      writer.add_scalar('Pretrain/Kldiv_inter', kldiv_inter.cpu().item(), step)
       return cost
   
-  def train_one_step(self, net, loader_iter, optimizer, criterion, writter, step):
-      net.train()
+  def train_one_step(self, loader_iter, optimizer, criterion, writter, step):
+      self.net.train()
       
       data, label, temp_anno, vid_names, _ = next(loader_iter)
       data = data.cuda()
       label = label.cuda()
 
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = self.net(data)
       # all_embbeddings are [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
       # Sample intra_embeddings
       intra_embeddings = all_embeddings[0]
@@ -132,7 +133,7 @@ class Trainer:
       #print('Embedding Targets {}, Intra Embeddings {}'.format(embedding_targets.shape, intra_embeddings.shape))
 
       if not self.initialized:
-          self.initialize(embedding_targets)
+          self.initialize(combined_embeddings.detach(), vid_names)
       # Snippet Contrastive Learning
       positive_indices, positives, positive_labels = self.get_positives(embedding_targets, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM)
       negatives, negative_indexes = self.queue.getNegatives(positive_indices)
@@ -140,12 +141,12 @@ class Trainer:
       vid_positives, vid_positives_indices, distances, shifts, prev_samples, prev_data  = self.get_positives_video_distance(combined_embeddings, vid_names, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM, self.cfg.FFT_K)
       with torch.no_grad():
           if self.cfg.FFT_K <= 1:
-              cas_top_pseudo, _, _ = net.forward_with_embeddings(vid_positives)
+              cas_top_pseudo = self.net.forward_with_embeddings(vid_positives)
           else:
               if(prev_data is not None):
                   cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings2(vid_positives_indices, distances, shifts, prev_data)
               else:
-                  cas_top_pseudo, cas_pseudo = self.forward_with_embeddings(vid_positives_indices, distances)
+                  cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings(vid_positives_indices, distances)
 
 
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, cas_top_pseudo,
@@ -153,10 +154,91 @@ class Trainer:
       
       cost.backward()
       optimizer.step()
-      self.queue.enqueue(combined_embeddings)
+      self.queue.enqueue(combined_embeddings.detach(), vid_names)
       for key in loss.keys():
           writter.add_scalar(key, loss[key].cpu().item(), step)
       return cost
+
+
+  @torch.no_grad()                                                      
+  def test_all(self, cfg, test_loader, test_info, step, writter=None, model_file=None):                        
+      self.net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
+                                                                                         
+      if model_file:                                                 
+          print('=> loading model: {}'.format(model_file))                                 
+          self.net.load_state_dict(torch.load(model_file))           
+          print('=> tesing model...')                                      
+                                                                                          
+      final_res = {'method': '[CoLA] https://github.com/zhang-can/CoLA', 'results': {}}
+
+      acc = AverageMeter()
+      num_proposals = 0
+      num_nms_proposals = 0
+      num_vids = len(test_loader)
+      all_proposals = {}
+      for data, label, _, vid, vid_num_seg in test_loader:
+          data, label = data.cuda(), label.cuda()
+          vid_num_seg = vid_num_seg[0].cpu().item()
+
+          video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = self.net(data) # No use for embeddings here.
+
+          label_np = label.cpu().data.numpy()
+          score_np = video_scores[0].cpu().data.numpy()
+
+          pred_np = np.where(score_np < cfg.CLASS_THRESH, 0, 1)
+          correct_pred = np.sum(label_np == pred_np, axis=1)
+          acc.update(float(np.sum((correct_pred == cfg.NUM_CLASSES))), correct_pred.shape[0])
+          pred = np.where(score_np >= cfg.CLASS_THRESH)[0]
+          if len(pred) == 0:
+              pred = np.array([np.argmax(score_np)])
+
+          cas_pred = utils.get_pred_activations(cas, pred, cfg)
+          aness_pred = utils.get_pred_activations(actionness, pred, cfg)
+          proposal_dict = utils.get_proposal_dict(cas_pred, aness_pred, pred, score_np, vid_num_seg, cfg)
+          num_proposals += sum([len(v) for v in proposal_dict.values()])
+          final_proposals = [utils.nms(v, cfg.NMS_THRESH) for _,v in proposal_dict.items()]
+          num_nms_proposals += sum([len(v) for v in final_proposals])
+          final_res['results'][vid[0]] = utils.result2json(final_proposals, cfg.CLASS_DICT)
+          for class_id, proposals in enumerate(final_proposals):
+              for m in range(len(proposals)):  # proposals are list of list
+                  all_proposals[class_id] = all_proposals.get(class_id, []) + [proposals[m]]
+      json_path = os.path.join(cfg.OUTPUT_PATH, 'result.json')
+      json.dump(final_res, open(json_path, 'w'))
+
+      anet_detection = ANETdetection(cfg.GT_PATH, json_path,
+                                subset='test', tiou_thresholds=cfg.TIOU_THRESH,
+                                verbose=False, check_status=False)
+      mAP, average_mAP = anet_detection.evaluate()
+
+      # calculate average duration
+      avg_duration = 0
+      prop_count = 0
+      for class_id, proposals in all_proposals.items():
+          prop_count += len(proposals)
+          avg_duration += np.sum([p[3] - p[2] for p in proposals])
+      avg_duration /= prop_count
+
+      if writter:
+          writter.add_scalar('Test Performance/Accuracy', acc.avg, step)
+          writter.add_scalar('Test Performance/mAP@AVG', average_mAP, step)
+          writter.add_scalar('Proposal Analysis/Pre_Proposals', num_proposals, step)
+          writter.add_scalar('Proposal Analysis/NMS_Proposals', num_nms_proposals,step)
+          if(num_vids != 0):
+              writter.add_scalar('Proposal Analysis/Proposals_Per_Video', num_nms_proposals/num_vids,step)
+              writter.add_scalar('Proposal Analysis/Average_Proposal_Duration',avg_duration,step)
+          for i in range(cfg.TIOU_THRESH.shape[0]):
+              writter.add_scalar('mAP@tIOU/mAP@{:.1f}'.format(cfg.TIOU_THRESH[i]), mAP[i], step)
+
+      test_info["step"].append(step)
+      test_info["test_acc"].append(acc.avg)
+      test_info["average_mAP"].append(average_mAP)
+
+      for i in range(cfg.TIOU_THRESH.shape[0]):
+          test_info["mAP@{:.1f}".format(cfg.TIOU_THRESH[i])].append(mAP[i])
+      return test_info['mAP@0.5'][-1], average_mAP
+
+
+
 
 def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.GPU_ID
@@ -204,7 +286,7 @@ def main():
         betas=(0.9, 0.999), weight_decay=0.0005)
 
     if cfg.MODE == 'test':
-        _, _ = test_all(net, cfg, test_loader, test_info, 0, None, cfg.MODEL_FILE)
+        _, _ = trainer.test_all(cfg, test_loader, test_info, 0, None, cfg.MODEL_FILE)
         utils.save_best_record_thumos(test_info, 
             os.path.join(cfg.OUTPUT_PATH, "best_results.txt"))
         print(utils.table_format(test_info, cfg.TIOU_THRESH, '[CoLA] THUMOS\'14 Performance'))
@@ -215,7 +297,7 @@ def main():
     print('=> test frequency: {} steps'.format(cfg.TEST_FREQ))
     print('=> start training...')
     trainer = Trainer(cfg)
-
+    trainer.net = net # for future stuff
 
     pre_train_loader = torch.utils.data.DataLoader(
         NpyFeature(data_path=cfg.DATA_PATH, mode='train',
@@ -240,7 +322,7 @@ def main():
             batch_time = AverageMeter()
             losses = AverageMeter()
             end = time.time()
-            cost = trainer.pretrain_encoder_decoder_step(net, loader_iter, optimizer, criterion, writter, step)
+            cost = trainer.pretrain_encoder_decoder_step(loader_iter, optimizer, criterion, writter, step)
             losses.update(cost.item(), cfg.BATCH_SIZE)
             batch_time.update(time.time() - end)
             end = time.time()
@@ -267,7 +349,7 @@ def main():
         losses = AverageMeter()
         
         end = time.time()
-        cost = trainer.train_one_step(net, loader_iter, optimizer, criterion, writter, step,)
+        cost = trainer.train_one_step(loader_iter, optimizer, criterion, writter, step,)
         losses.update(cost.item(), cfg.BATCH_SIZE)
         batch_time.update(time.time() - end)
         end = time.time()
@@ -279,7 +361,7 @@ def main():
             
         if step > -1 and step % cfg.TEST_FREQ == 0:
 
-            mAP_50, mAP_AVG = test_all(net, cfg, test_loader, test_info, step, writter)
+            mAP_50, mAP_AVG = trainer.test_all(cfg, test_loader, test_info, step, writter)
 
             if test_info["average_mAP"][-1] > best_mAP:
                 best_mAP = test_info["average_mAP"][-1]
@@ -299,8 +381,8 @@ def main():
     print(utils.table_format(best_test_info, cfg.TIOU_THRESH, '[CoLA] THUMOS\'14 Performance'))
 
 @torch.no_grad()
-def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=None):
-    net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
+def test_all(cfg, test_loader, test_info, step, writter=None, model_file=None):
+    self.net.eval() # To get the mu from the VAE directly, we need to set the model to eval mode.
 
     if model_file:
         print('=> loading model: {}'.format(model_file))
@@ -318,7 +400,7 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
         data, label = data.cuda(), label.cuda()
         vid_num_seg = vid_num_seg[0].cpu().item()
 
-        video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = net(data) # No use for embeddings here.
+        video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = self.net(data) # No use for embeddings here.
 
         label_np = label.cpu().data.numpy()
         score_np = video_scores[0].cpu().data.numpy()
