@@ -6,7 +6,7 @@
 import torch
 import torch.nn as nn
 
-from NCELoss.NNIICLUV_Tests.loss import InfoNCELoss, KLDivLoss, LatentLossMasked
+from NCELoss.NNIICLUV_Tests.loss import InfoNCELoss, KLDivLoss, LatentLossMasked, KLDivergencePseudoLoss
 
 class ActionLoss(nn.Module):
     def __init__(self):
@@ -39,9 +39,9 @@ class SniCoLoss(nn.Module):
         return loss
 
     def forward(self, contrast_pairs):
-        #for keys, vals in contrast_pairs.items():
-        #    print('Keys are ', keys)
-        #print(f"HA {contrast_pairs['HA'].shape}, EA {contrast_pairs['EA'].shape}, EB {contrast_pairs['EB'].shape}")
+        for keys, vals in contrast_pairs.items():
+            print('Keys are ', keys)
+        print(f"HA {contrast_pairs['HA'].shape}, EA {contrast_pairs['EA'].shape}, EB {contrast_pairs['EB'].shape}")
         HA_refinement = self.NCE(
             torch.mean(contrast_pairs['HA'], 1), 
             torch.mean(contrast_pairs['EA'], 1), 
@@ -81,24 +81,32 @@ class LatentLoss(nn.Module):
 class TotalLoss(nn.Module):
     def __init__(self, cfg):
         super(TotalLoss, self).__init__()
+        self.kl_latent = cfg.KL_PSEUDO
         self.action_criterion = ActionLoss()
         self.snico_criterion = SniCoLoss()
         self.nce_criterion = InfoNCELoss()
-        self.vid_pseudo_loss = LatentLossMasked() # Masked() #VidPseudoLoss()
+        if self.kl_latent:
+            self.vid_pseudo_loss = KLDivergencePseudoLoss() #LatentLossMasked() # Masked() #VidPseudoLoss()
+        else:
+            self.vid_pseudo_loss = LatentLossMasked()
         self.latent_loss = LatentLoss()
         self.kldiv_loss = KLDivLoss()
         self.nce_weight = cfg.NCE_WEIGHT
         self.pseudo_weight = cfg.PSEUDO_WEIGHT
         self.latent_weight = cfg.LATENT_LOSS_WEIGHT
         self.kldiv_weight = cfg.KLDIV_LOSS
+        self.kldiv_inter_scaling = cfg.KLDIV_INTER_SCALING
+        self.action_weight = cfg.ACTION_LOSS
 
 
     def forward(self, video_scores, label, contrast_pairs, sampled_embeddings, positives, negatives, pseudo_video_scores, enc_decoder_embeddings, intra_params, inter_params):
         input_feature, decoded_inter, decoded_intra = enc_decoder_embeddings
+        #print("video_scores", video_scores.shape, video_scores.min(), video_scores.max())
+        #print("labels", label.shape, label.min(), label.max())
         loss_cls = self.action_criterion(video_scores, label) # Classification Loss
         loss_snico = self.snico_criterion(contrast_pairs) # CoLa Contrastive Loss
         loss_nce = self.nce_criterion(sampled_embeddings, positives, negatives)
-        print(f'Vid scores {video_scores.shape}, pseudo {pseudo_video_scores.shape}')
+        #print(f'Vid scores {video_scores.shape}, pseudo {pseudo_video_scores.shape}')
         loss_pseudo = self.vid_pseudo_loss(video_scores, pseudo_video_scores) # Video Pseudo Label Loss
         loss_latent_inter = self.latent_loss(input_feature, decoded_inter)
         loss_latent_intra = self.latent_loss(input_feature, decoded_intra)
@@ -107,22 +115,22 @@ class TotalLoss(nn.Module):
         kldiv_intra = self.kldiv_loss(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
         kldiv_inter = self.kldiv_loss(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
         
-        loss_total = loss_cls + 0.01 * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
+        loss_total = self.action_weight * loss_cls + 0.01 * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
 
         loss_total += self.latent_weight * (loss_latent_inter + loss_latent_intra)
-        loss_total += self.kldiv_weight * (kldiv_intra + kldiv_inter) / 2.0
+        loss_total += self.kldiv_weight * (kldiv_intra + self.kldiv_inter_scaling * kldiv_inter) / 2.0
 
         loss_dict = {
             'Loss/Total': loss_total,
             'Loss/Action': loss_cls,
             'Loss/SniCo': loss_snico,
-            'Loss/Intra': loss_nce,
+            'Loss/NCE': loss_nce,
             'Loss/Pseudo': loss_pseudo,
             'Loss/LatentInter': loss_latent_inter,
             'Loss/LatentIntra': loss_latent_intra,
             'Loss/KLDivIntra': kldiv_intra,
             'Loss/KLDivInter': kldiv_inter
         }
-        for keys, vals in loss_dict.items():
-            print(f'{keys}: {vals}')
+        #for keys, vals in loss_dict.items():
+        #    print(f'{keys}: {vals}')
         return loss_total, loss_dict

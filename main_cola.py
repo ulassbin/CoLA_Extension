@@ -21,6 +21,7 @@ from core.dataset import NpyFeature
 from torch.utils.tensorboard import SummaryWriter
 from eval.eval_detection import ANETdetection
 from terminaltables import AsciiTable
+import torch.nn as nn
 
 from NCELoss.NNIICLUV_Tests.custom_queue import Queue
 from NCELoss.NNIICLUV_Tests.loss import KLDivLoss
@@ -33,6 +34,8 @@ class Trainer:
       self.queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
       self.nn_queue = Queue(queue_size=cfg.QUEUE_SIZE, embedding_dim=cfg.PROJ_DIM, device='cuda')
       self.initialized = False
+      self.softmax = nn.Softmax(dim=1)
+ 
 
   def initialize(self, embeddings, vid_names):
       print('Initializeing with ', embeddings.shape)
@@ -78,15 +81,23 @@ class Trainer:
       cas_top = torch.mean(torch.gather(cas, 1, topk_indices), dim=1)
       return cas_top, topk_indices
 
+  def get_topk2(self, cas):
+      k_easy = cfg.R_EASY
+      sorted_scores, _= cas.sort(descending=True, dim=1)
+      topk_scores = sorted_scores[:, :k_easy, :]
+      video_scores = self.softmax(topk_scores.mean(1))
+      return video_scores
+
+
   def forward_pass_with_k_embeddings(self, topk_indices, distances):
       cas_targets = self.queue.get_fused_cas_targets(self.net, topk_indices, distances)
-      cas_top, topk_action_indices = self.get_topk(cas_targets)
-      return cas_top, cas_targets
+      cas_top  = self.get_topk2(cas_targets)
+      return self.softmax(cas_top), cas_targets
 
   def forward_pass_with_k_embeddings2(self, topk_indices, distances, shifts, prev_data):
       cas_targets = self.queue.get_fused_cas_targets2(self.net, topk_indices, distances, shifts, prev_data)
-      cas_top, topk_action_indices = self.get_topk(cas_targets)
-      return cas_top, cas_targets
+      cas_top = self.get_topk2(cas_targets)
+      return self.softmax(cas_top), cas_targets
 
   def pretrain_encoder_decoder_step(self, loader_iter, optimizer, criterion, writer, step):
       self.net.train()
@@ -106,7 +117,7 @@ class Trainer:
       # Reshape intra_params and inter_params to match the expected dimensions
       kldiv_intra = kl_criterion(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
       kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
-      cost += cfg.KLDIV_LOSS * (kldiv_intra + kldiv_inter) / 2.0
+      cost += cfg.KLDIV_LOSS * (kldiv_intra + cfg.KLDIV_INTER_SCALING*kldiv_inter) / 2.0
       cost.backward()
       optimizer.step()
       writer.add_scalar('Pretrain/Latent_intra', pre_intra.cpu().item(), step)
@@ -117,11 +128,19 @@ class Trainer:
   
   def train_one_step(self, loader_iter, optimizer, criterion, writter, step):
       self.net.train()
-      
+      # Freeze projection module
+      #self.net.set_requires_grad(self.net.projection_module, requires_grad=False) # Testing this!
+      #optimizer = torch.optim.Adam(
+      #  filter(lambda p: p.requires_grad, self.net.parameters()), 
+      #  lr=self.cfg.LR[0],
+      #  betas=(0.9, 0.999), 
+      #  weight_decay=0.0005
+      #) # Freeze over!
+      print(f'Log path {self.cfg.LOG_PATH}')
       data, label, temp_anno, vid_names, _ = next(loader_iter)
       data = data.cuda()
       label = label.cuda()
-
+      first_run = False
       optimizer.zero_grad()
       video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = self.net(data)
       # all_embbeddings are [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
@@ -134,19 +153,24 @@ class Trainer:
 
       if not self.initialized:
           self.initialize(combined_embeddings.detach(), vid_names)
+          first_run = True
       # Snippet Contrastive Learning
       positive_indices, positives, positive_labels = self.get_positives(embedding_targets, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM)
       negatives, negative_indexes = self.queue.getNegatives(positive_indices)
       # Video Contrastive Learning
       vid_positives, vid_positives_indices, distances, shifts, prev_samples, prev_data  = self.get_positives_video_distance(combined_embeddings, vid_names, self.cfg.NUM_SEGMENTS, self.cfg.PROJ_DIM, self.cfg.FFT_K)
+      #print(f"distances {distances}"} 
       with torch.no_grad():
           if self.cfg.FFT_K <= 1:
-              cas_top_pseudo = self.net.forward_with_embeddings(vid_positives)
+              cas_pseudo = self.net.forward_with_embeddings(vid_positives)
+              cas_top_pseudo = self.get_topk2(cas_pseudo)
           else:
               if(prev_data is not None):
                   cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings2(vid_positives_indices, distances, shifts, prev_data)
+                  #print(f"Embed2: cas_top_pseduo {cas_top_pseudo}")
               else:
                   cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings(vid_positives_indices, distances)
+                  #print(f"Embed cas_top_pseudo {cas_top_pseudo}")
 
 
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, cas_top_pseudo,
@@ -154,9 +178,12 @@ class Trainer:
       
       cost.backward()
       optimizer.step()
-      self.queue.enqueue(combined_embeddings.detach(), vid_names)
+      if not first_run:
+          self.queue.enqueue(combined_embeddings.detach(), vid_names)
       for key in loss.keys():
+          print(f'[{step} loss_{key}:{loss[key].cpu().item()}')
           writter.add_scalar(key, loss[key].cpu().item(), step)
+      writter.flush()
       return cost
 
   @torch.no_grad()
@@ -212,7 +239,7 @@ class Trainer:
 
       # calculate average duration
       avg_duration = 0
-      prop_count = 0
+      prop_count = 0.00001
       for class_id, proposals in all_proposals.items():
           prop_count += len(proposals)
           avg_duration += np.sum([p[3] - p[2] for p in proposals])
@@ -311,7 +338,7 @@ def main():
         for step in range(1, cfg.PRETRAIN_NUM_ITERS + 1):
             if step > 1 and cfg.LR[step - 1] != cfg.LR[step - 2]:
                 for param_group in optimizer.param_groups:
-                    param_group["lr"] = cfg.LR[step - 1]
+                    param_group["lr"] = cfg.PRETRAIN_LR
 
             if (step - 1) % len(pre_train_loader) == 0:
                 loader_iter = iter(pre_train_loader)

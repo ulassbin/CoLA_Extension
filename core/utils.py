@@ -4,6 +4,7 @@
 # [Github] - https://github.com/zhang-can/CoLA
 
 import os
+import socket
 import time
 import torch
 import random
@@ -173,7 +174,9 @@ def set_path(config):
         #easy_{cfg.R_EASY}_hard_{cfg.R_HARD}_m_{cfg.m}_M_{cfg.M}_freq_{cfg.TEST_FREQ}_seed_{cfg.SEED}
         qsizeK = config.QUEUE_SIZE // 1000
         config.qsizeK = qsizeK
-        config.EXP_NAME = 'experiments/{cfg.MODE}/nce_{cfg.NCE_WEIGHT}_qsizeK_{cfg.qsizeK}_sampling_{cfg.SAMPLING_RATE}_pseudo_{cfg.PSEUDO_WEIGHT}_latentloss_{cfg.LATENT_LOSS_WEIGHT}_epoch_lr_{cfg.LR}_batch_{cfg.BATCH_SIZE}' \
+        pod_id = socket.gethostname()
+        config.POD_ID = pod_id
+        config.EXP_NAME = 'experiments/{cfg.MODE}/{cfg.POD_ID}/nce_{cfg.NCE_WEIGHT}_qsizeK_{cfg.qsizeK}_sampling_{cfg.SAMPLING_RATE}_pseudo_{cfg.PSEUDO_WEIGHT}_latentloss_{cfg.LATENT_LOSS_WEIGHT}_epoch_lr_{cfg.LR}_batch_{cfg.BATCH_SIZE}' \
                '_m_{cfg.m}_M_{cfg.M}_freq_{cfg.TEST_FREQ}' \
                '_seed_{cfg.SEED}'.format(cfg=config)
         config.MODEL_PATH = os.path.join(config.EXP_NAME, 'model')

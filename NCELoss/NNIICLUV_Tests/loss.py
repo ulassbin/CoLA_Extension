@@ -20,6 +20,23 @@ import random
 #        normalized_loss = masked_loss.sum() / (mask.sum() + self.eps)
 #        return normalized_loss
 
+
+class KLDivergencePseudoLoss(nn.Module):
+    def __init__(self, reduction='batchmean', eps=1e-8):
+        super(KLDivergencePseudoLoss, self).__init__()
+        self.reduction = reduction
+        self.eps = eps
+        self.kl_div = nn.KLDivLoss(reduction=reduction)
+
+    def forward(self, input_probs, target_probs):
+        """
+        input_probs: predicted probabilities (e.g., from softmax), shape [batch, num_classes]
+        target_probs: target/pseudo-label probabilities, same shape
+        """
+        log_input = torch.log(input_probs + self.eps)  # avoid log(0)
+        return self.kl_div(log_input, target_probs.detach())
+
+
 class LatentLossMasked(nn.Module):
     def __init__(self):
         super(LatentLossMasked, self).__init__()

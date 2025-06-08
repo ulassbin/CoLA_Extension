@@ -18,7 +18,7 @@ class Actionness_Module(nn.Module):
         self.f_embed = nn.Sequential(
             nn.Conv1d(in_channels=self.len_feature, out_channels=2048, kernel_size=3,
                       stride=1, padding=1),
-            nn.ReLU()
+            nn.LeakyReLU() #ReLU() 
         )
 
         self.f_cls = nn.Sequential(
@@ -64,6 +64,18 @@ class CoLA(nn.Module):
         self.M = cfg.M
 
         self.dropout = nn.Dropout(p=0.6)
+
+    def set_requires_grad(self, module, requires_grad: bool = False):
+        """
+        Freeze or unfreeze the parameters of a given submodule.
+    
+        Args:
+        module (nn.Module): Submodule whose parameters to freeze/unfreeze.
+        requires_grad (bool): If False, freezes the parameters. If True, unfreezes.
+        """
+        for param in module.parameters():
+            param.requires_grad = requires_grad
+
 
     def select_topk_embeddings(self, scores, embeddings, k):
         _, idx_DESC = scores.sort(descending=True, dim=1)
@@ -153,5 +165,5 @@ class CoLA(nn.Module):
             'HA': hard_act,
             'HB': hard_bkg
         }
-        video_scores = self.get_video_cls_scores(cas, k_easy)
-        return video_scores
+        #video_scores = self.get_video_cls_scores(cas, k_easy)
+        return cas

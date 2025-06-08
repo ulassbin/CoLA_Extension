@@ -168,7 +168,7 @@ class Queue():
         #print('Len vid names: ', len(vid_names))
         indices = {f'{item}':[] for item in vid_names}
         if len(self.distances) == 0 or len(vid_names) == 0:
-            print(f'Cant get prev distances REASON: Self dist {len(self.distances)}, vid_names: {len(vid_names)}')
+            #print(f'Cant get prev distances REASON: Self dist {len(self.distances)}, vid_names: {len(vid_names)}')
             return indices
         else:
             for i, vid_name in enumerate(vid_names):
@@ -198,9 +198,9 @@ class Queue():
                    vid_index = self.vid_names.index(target_vid)
                    vid_data = self.queue[self.vid_queue[vid_index]]
                    padded_vid_data.append([vid_data, distance, shift])
-               else:
-                   print('Target video {} not found in vid_names {}'.format(target_vid, len(self.vid_names)))
-           print(f'{vid_name} padded vid data {len(padded_vid_data)}')
+               #else:
+               #    print('Target video {} not found in vid_names {}'.format(target_vid, len(self.vid_names)))
+           #print(f'{vid_name} padded vid data {len(padded_vid_data)}')
            data.append(copy.deepcopy(padded_vid_data))
        # Now data is a list of lists, where each inner list contains [vid_data, distance]
        return data
@@ -208,6 +208,7 @@ class Queue():
     def find_nearest_vids(self, full_embeddings, vid_names, max_samples=20, max_k=5, random_ratio=0.5):
         # We have vids stored in a list called vid_queue
         num_vids = len(self.vid_queue) # How many unique videos we have
+        print(f'Num Vids {num_vids}')
         if(num_vids == 0):
             print('Vid queue is currently empty')
             return None, None, None
@@ -245,9 +246,10 @@ class Queue():
            weights = torch.ones(cas_tensor.shape[0], cas_tensor.shape[1], device=cas_tensor.device)
         # Normalize weights
         weights = 1/weights # Since these are not weights but distances!
-        weights = F.softmax(weights, dim=0)
+        #weights = F.softmax(weights, dim=0)
+        weights = weights / weights.sum(dim=0,keepdim=True)
         # Expand weights to match the feature dimension
-        weights = weights.view(weights.shape[0], 1, 1)
+        weights = weights.view(weights.shape[0], 1, 1) # .detach() # Also detach??
         # Perform weighted sum
         #print(f'cas {cas_tensor.shape} weights {weights.shape}')
         weighted_sum = torch.sum(cas_tensor * weights, dim=0)
@@ -296,12 +298,12 @@ class Queue():
             fused_cas = self.cas_fusion(cas_targets, similar_weights)  # shape: (T, num_classes)
             fused_cas_list.append(fused_cas)
 
-        max_T = max(fc.shape[0] for fc in fused_cas_list) # quickfix
-        for i in range(len(fused_cas_list)):
-            pad_T = max_T - fused_cas_list[i].shape[0]
-            if pad_T > 0:
-               pad_tensor = torch.zeros((pad_T, fused_cas_list[i].shape[1]), device=fused_cas_list[i].device)
-               fused_cas_list[i] = torch.cat([fused_cas_list[i], pad_tensor], dim=0)
+        #max_T = max(fc.shape[0] for fc in fused_cas_list) # quickfix
+        #for i in range(len(fused_cas_list)):
+        #    pad_T = max_T - fused_cas_list[i].shape[0]
+        #    if pad_T > 0:
+        #       pad_tensor = torch.zeros((pad_T, fused_cas_list[i].shape[1]), device=fused_cas_list[i].device)
+        #       fused_cas_list[i] = torch.cat([fused_cas_list[i], pad_tensor], dim=0)
         # Stack to shape: (batch, T, num_classes)
         return torch.stack(fused_cas_list, dim=0)
 
