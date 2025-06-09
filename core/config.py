@@ -17,7 +17,7 @@ cfg.SAMPLING_RATE = 0.2
 cfg.LOG_PATH = '/abyss/home/forked_CoLa/CoLA_Extension/experiments/'
 # Video Distance Specific Paramaters
 cfg.PSEUDO_WEIGHT = 10.0 #1.0 #%10 of action loss atm. # Keep it low...
-
+cfg,KLDIV_LOSS = 1.0
 # Latent train in between
 cfg.LATENT_TRAIN_BETWEEN = True
 

@@ -23,6 +23,7 @@ from eval.eval_detection import ANETdetection
 from terminaltables import AsciiTable
 
 from NCELoss.NNIICLUV_Tests.custom_queue import Queue
+from NCELoss.NNIICLUV_Tests.loss import KLDivLoss
 
 
 class Trainer:
@@ -73,11 +74,17 @@ class Trainer:
       data = data.cuda()
       label = label.cuda()
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
       criterion = LatentLoss()
+      kldiv_loss = KLDivLoss()
       decoded_inter = all_embeddings[2]
       decoded_intra = all_embeddings[3]
       cost = cfg.LATENT_LOSS_PRE * (criterion(data, decoded_inter) + criterion(data, decoded_intra))/2.0
+      batch, time, feats = intra_params[0].shape
+      #print(f'Sizes for params {intra_params[0].shape}, {intra_params[1].shape}')
+      kldiv_intra = kldiv_loss(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
+      kldiv_inter = kldiv_loss(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) / time # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
+      cost += cfg.KLDIV_LOSS * (kldiv_intra + kldiv_inter) # we will add kldiv loss here!
       cost.backward()
       optimizer.step()
       writer.add_scalar('PRE_Latent Loss', cost.cpu().item(), step)
@@ -91,30 +98,32 @@ class Trainer:
       label = label.cuda()
 
       optimizer.zero_grad()
-      video_scores, contrast_pairs, _, _, all_embeddings = net(data)
+      video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = net(data)
       # all_embbeddings are [intra_embeddings, inter_embeddings, decoded_inter, decoded_intra]
       # Sample intra_embeddings
       intra_embeddings = all_embeddings[0]
-      embedding_targets = self.sample_embeddings(intra_embeddings)
+      inter_embeddings = all_embeddings[1]
+      combined_embeddings = (intra_embeddings + inter_embeddings) / 2  # Combine intra and inter embeddings
+      embedding_targets = self.sample_embeddings(combined_embeddings)
       #print('Embedding Targets {}, Intra Embeddings {}'.format(embedding_targets.shape, intra_embeddings.shape))
 
       if not self.initialized:
-          self.initialize(embedding_targets)
+          self.initialize(combined_embeddings)
       # Snippet Contrastive Learning
       positive_indices, positives, positive_labels = self.get_positives(embedding_targets, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
       negatives, negative_indexes = self.queue.getNegatives(positive_indices)
       # Video Contrastive Learning
-      vid_positives, vid_positives_indices = self.get_positives_video_distance(intra_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
+      vid_positives, vid_positives_indices = self.get_positives_video_distance(combined_embeddings, cfg.NUM_SEGMENTS, cfg.PROJ_DIM)
       with torch.no_grad():
           #pseudo_labels, _, _, _, re_embeddings = net(vid_positives)
           pseudo_labels, _, _ = net.forward_with_embeddings(vid_positives)
       #print('Embeddins {}, Positives {}, Negatives {}'.format(intra_embeddings.shape, positives.shape, negatives.shape))
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, pseudo_labels,
-                             [data, all_embeddings[2], all_embeddings[3]])
+                             [data, all_embeddings[2], all_embeddings[3]], intra_params, in)
       
       cost.backward()
       optimizer.step()
-      self.queue.enqueue(intra_embeddings)
+      self.queue.enqueue(combined_embeddings)
       for key in loss.keys():
           writter.add_scalar(key, loss[key].cpu().item(), step)
       return cost
@@ -279,7 +288,7 @@ def test_all(net, cfg, test_loader, test_info, step, writter=None, model_file=No
         data, label = data.cuda(), label.cuda()
         vid_num_seg = vid_num_seg[0].cpu().item()
 
-        video_scores, _, actionness, cas, all_embeddings = net(data) # No use for embeddings here.
+        video_scores, _, actionness, cas, all_embeddings, intra_params, inter_params = net(data) # No use for embeddings here.
 
         label_np = label.cpu().data.numpy()
         score_np = video_scores[0].cpu().data.numpy()
