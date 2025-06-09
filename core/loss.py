@@ -97,6 +97,7 @@ class TotalLoss(nn.Module):
         self.kldiv_weight = cfg.KLDIV_LOSS
         self.kldiv_inter_scaling = cfg.KLDIV_INTER_SCALING
         self.action_weight = cfg.ACTION_LOSS
+        self.snico_weight = cfg.SNICO_LOSS # prev 0.01 hardcoded
 
 
     def forward(self, video_scores, label, contrast_pairs, sampled_embeddings, positives, negatives, pseudo_video_scores, enc_decoder_embeddings, intra_params, inter_params):
@@ -113,9 +114,9 @@ class TotalLoss(nn.Module):
         batch, time, feats = intra_params[0].shape
         # Reshape intra_params and inter_params to match the expected dimensions
         kldiv_intra = self.kldiv_loss(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
-        kldiv_inter = self.kldiv_loss(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
+        kldiv_inter = self.kldiv_loss(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) / time # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
         
-        loss_total = self.action_weight * loss_cls + 0.01 * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
+        loss_total = self.action_weight * loss_cls + self.snico_weight * loss_snico + self.nce_weight * loss_nce + self.pseudo_weight * loss_pseudo
 
         loss_total += self.latent_weight * (loss_latent_inter + loss_latent_intra)
         loss_total += self.kldiv_weight * (kldiv_intra + self.kldiv_inter_scaling * kldiv_inter) / 2.0

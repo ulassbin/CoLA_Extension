@@ -116,7 +116,7 @@ class Trainer:
       batch, time, feats = intra_params[0].shape
       # Reshape intra_params and inter_params to match the expected dimensions
       kldiv_intra = kl_criterion(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
-      kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
+      kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) / time # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
       cost += cfg.KLDIV_LOSS * (kldiv_intra + cfg.KLDIV_INTER_SCALING*kldiv_inter) / 2.0
       cost.backward()
       optimizer.step()
@@ -172,7 +172,10 @@ class Trainer:
                   cas_top_pseudo, cas_pseudo = self.forward_pass_with_k_embeddings(vid_positives_indices, distances)
                   #print(f"Embed cas_top_pseudo {cas_top_pseudo}")
 
-
+      # Annealing for kldiv
+      def get_kld_weight(epoch, max_weight=1.0, warmup_epochs=10):
+          return min(max_weight, epoch / warmup_epochs)
+      criterion.kldiv_weight = get_kld_weight(step,self.cfg.KLDIV_LOSS,warmup_epochs=100)
       cost, loss = criterion(video_scores, label, contrast_pairs, embedding_targets, positives, negatives, cas_top_pseudo,
                              [data, all_embeddings[2], all_embeddings[3]], intra_params, inter_params)
       
@@ -282,10 +285,10 @@ def main():
         NpyFeature(data_path=cfg.DATA_PATH, mode='train',
                         modal=cfg.MODAL, feature_fps=cfg.FEATS_FPS,
                         num_segments=cfg.NUM_SEGMENTS, supervision='weak',
-                        class_dict=cfg.CLASS_DICT, seed=cfg.SEED, sampling='random'),
+                        class_dict=cfg.CLASS_DICT, seed=cfg.SEED, sampling='uniform'),
             batch_size=cfg.BATCH_SIZE,
             shuffle=True, num_workers=cfg.NUM_WORKERS,
-            worker_init_fn=worker_init_fn)
+            worker_init_fn=worker_init_fn) # old: random sampling
 
     test_loader = torch.utils.data.DataLoader(
         NpyFeature(data_path=cfg.DATA_PATH, mode='test',
@@ -307,7 +310,7 @@ def main():
   
     cfg.LR = eval(cfg.LR)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.LR[0],
-        betas=(0.9, 0.999), weight_decay=0.0005)
+        betas=(0.8, 0.98) , weight_decay=0.0005) # old betas (0.9, 0.999
 
     if cfg.MODE == 'test':
         _, _ = trainer.test_all(cfg, test_loader, test_info, 0, None, cfg.MODEL_FILE)

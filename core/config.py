@@ -23,20 +23,21 @@ cfg.PSEUDO_WEIGHT = 0.0 #1.0 #10 of action loss atm. # Keep it low...
 cfg.FFT_K = 10 # Number of nearest neighbors to consider in the frequency domain
 # Latent train in between
 cfg.LATENT_TRAIN_BETWEEN = False
-cfg.KLDIV_INTER_SCALING = 0.0001 # because inter/intra = 1k approx
+cfg.KLDIV_INTER_SCALING = 1.0 #0.0001 # because inter/intra = 1k approx
 cfg.KLDIV_LOSS = 1.0 # KL Divergence loss weight
 #cfg.KLDIV_LOSS_SCALING=0.1
-cfg.ACTION_LOSS = 1.0
+cfg.ACTION_LOSS = 1.0 # used to be 1.0
+cfg.SNICO_LOSS = 0.0005 # prev it was 0.01
 # Latent Representation parameters
 cfg.LATENT_LOSS_WEIGHT = 1.0 # Really force latent representation to be similar
 cfg.PRETRAIN_ENCODER_DECODER = True
-cfg.PRETRAIN_BATCH_SIZE = 100
-cfg.PRETRAIN_NUM_ITERS = 100 # 600 # 1000
-cfg.PRETRAIN_LR = 0.01 # 10 times higher
+cfg.PRETRAIN_BATCH_SIZE = 200
+cfg.PRETRAIN_NUM_ITERS = 50 # 600 # 1000
+cfg.PRETRAIN_LR = 0.001 # 10 times higher
 cfg.LATENT_LOSS_PRE = 1.0
 # CoLA Configurations
 cfg.GPU_ID = '0'
-cfg.LR = '[0.001]*60000'
+cfg.LR = '[0.05]*60000' # 0.0001
 cfg.NUM_ITERS = len(eval(cfg.LR))
 cfg.NUM_CLASSES = 20
 cfg.MODAL = 'all'
@@ -49,7 +50,7 @@ cfg.R_EASY = 5
 cfg.R_HARD = 20
 cfg.m = 3
 cfg.M = 6
-cfg.TEST_FREQ = 19
+cfg.TEST_FREQ = 25
 cfg.PRINT_FREQ = 5
 cfg.CLASS_THRESH = 0.2
 cfg.NMS_THRESH = 0.6

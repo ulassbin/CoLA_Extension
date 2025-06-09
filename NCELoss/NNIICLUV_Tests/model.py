@@ -17,7 +17,7 @@ class VAE_Simple(nn.Module):
         self.fc = nn.Linear(feature_dim, 128)
         self.mu = nn.Linear(128, latent_dim)
         self.logvar = nn.Linear(128, latent_dim)
-        self.activation = nn.ReLU()
+        self.activation = nn.LeakyReLU(0.2)
 
     def forward(self, x):
         h = self.activation(self.fc(x))
@@ -39,13 +39,13 @@ class NearestNeighborContrastiveI3D(nn.Module):
         # Now make a decoder for the intra and inter projections
         self.intra_decoder = nn.Sequential(
             nn.Linear(projection_dim, feature_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 
         self.inter_decoder = nn.Sequential(
             nn.Linear(projection_dim, feature_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 

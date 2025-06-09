@@ -151,9 +151,16 @@ class NpyFeature(data.Dataset):
         return samples.astype(int)
 
 
+    #def uniform_sampling(self, length):
+    #    if length <= self.num_segments:
+    #        return np.arange(length).astype(int)
+    #    samples = np.arange(self.num_segments) * length / self.num_segments
+    #    samples = np.floor(samples)
+    #    return samples.astype(int)
+
     def uniform_sampling(self, length):
-        if length <= self.num_segments:
-            return np.arange(length).astype(int)
+        if self.num_segments == length:
+            return np.arange(self.num_segments).astype(int)
         samples = np.arange(self.num_segments) * length / self.num_segments
         samples = np.floor(samples)
         return samples.astype(int)
