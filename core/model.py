@@ -52,7 +52,7 @@ class CoLA(nn.Module):
         self.len_feature = cfg.FEATS_DIM
         self.num_classes = cfg.NUM_CLASSES
 
-        self.projection_module = NearestNeighborContrastiveI3D(cfg.FEATS_DIM, cfg.PROJ_DIM)
+        self.projection_module = NearestNeighborContrastiveI3D(cfg.FEATS_DIM, cfg.PROJ_DIM, cfg.NUM_SEGMENTS)
         self.feature_projection = nn.Linear(2*cfg.PROJ_DIM, cfg.PROJ_DIM) # From paper reviews
         self.actionness_module = Actionness_Module(cfg.PROJ_DIM, cfg.NUM_CLASSES)
 
@@ -120,7 +120,7 @@ class CoLA(nn.Module):
     
     def get_combined_embeddings(self, intra_embeddings, inter_embeddings):
         batch, T, proj_dim = intra_embeddings.shape
-        combined_embeddings = torch.cat((intra_embeddings, inter_embeddings.repeat(1, T, 1)), dim=2)
+        combined_embeddings = torch.cat((intra_embeddings, inter_embeddings.unsqueeze(1).repeat(1, T, 1)), dim=2)
         combined_embeddings = self.feature_projection(combined_embeddings)  # batchxtimexproj_dim
         return combined_embeddings
 

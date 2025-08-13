@@ -118,6 +118,7 @@ class Trainer:
       kldiv_intra = kl_criterion(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
       kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
       cost += cfg.KLDIV_LOSS * (kldiv_intra + cfg.KLDIV_INTER_SCALING*kldiv_inter) / 2.0
+      print(f'Costs - Reconstruction Intra: {pre_intra.cpu().item()}, Reconstruction Inter: {pre_inter.cpu().item()}, KLDiv Intra: {kldiv_intra.cpu().item()}, KLDiv Inter: {kldiv_inter.cpu().item()}')
       cost.backward()
       optimizer.step()
       writer.add_scalar('Pretrain/Reconst_intra', pre_intra.cpu().item(), step)
@@ -342,6 +343,12 @@ def main():
             if step > 1 and cfg.LR[step - 1] != cfg.LR[step - 2]:
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = cfg.PRETRAIN_LR
+                    optimizer = torch.optim.Adam(
+                        filter(lambda p: p.requires_grad, net.parameters()), 
+                        lr=cfg.PRETRAIN_LR,
+                        betas=(0.8, 0.98), 
+                        weight_decay=0.0005
+                    )
 
             if (step - 1) % len(pre_train_loader) == 0:
                 loader_iter = iter(pre_train_loader)

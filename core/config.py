@@ -16,7 +16,7 @@ cfg.QUEUE_SIZE = 200000
 cfg.SAMPLING_RATE = 0.2
 cfg.SAMPLED_VID_NUM = 50
 cfg.sampled_vid_num = cfg.SAMPLED_VID_NUM
-cfg.LOG_PATH = '/abyss/home/forked_CoLa/CoLA_Extension/experiments/'
+cfg.LOG_PATH = '/home/ulas/Documents/PhD/2.Codes/CoLA_Extension/experiments/' #'/abyss/home/forked_CoLa/CoLA_Extension/experiments/'
 # Video Distance Specific Paramaters
 cfg.KL_PSEUDO = True
 cfg.PSEUDO_WEIGHT = 0.0 #1.0 #10 of action loss atm. # Keep it low...
@@ -31,19 +31,19 @@ cfg.SNICO_LOSS = 0.0005 # prev it was 0.01
 # Latent Representation parameters
 cfg.LATENT_LOSS_WEIGHT = 1.0 # Really force latent representation to be similar
 cfg.PRETRAIN_ENCODER_DECODER = True
-cfg.PRETRAIN_BATCH_SIZE = 200
-cfg.PRETRAIN_NUM_ITERS = 50 # 600 # 1000
-cfg.PRETRAIN_LR = 0.001 # 10 times higher
+cfg.PRETRAIN_BATCH_SIZE = 20 # 200
+cfg.PRETRAIN_NUM_ITERS = 500 # 600 # 1000
+cfg.PRETRAIN_LR = 1e-10 # 10 times higher
 cfg.LATENT_LOSS_PRE = 1.0
 # CoLA Configurations
 cfg.GPU_ID = '0'
-cfg.LR = '[0.05]*60000' # 0.0001
+cfg.LR = '[0.0001]*60000' # 0.0001
 cfg.NUM_ITERS = len(eval(cfg.LR))
 cfg.NUM_CLASSES = 20
 cfg.MODAL = 'all'
 cfg.FEATS_DIM = 2048 # This is the feature size x2, loader combines rbg-flow into a a single vector!
 cfg.BATCH_SIZE = 50
-cfg.DATA_PATH = '/abyss/home/THUMOS14'
+cfg.DATA_PATH = '/home/ulas/Documents/Datasets/ThumosSmallTest/THUMOS14' #'/abyss/home/THUMOS14'
 cfg.NUM_WORKERS = 8
 cfg.LAMBDA = 0.01
 cfg.R_EASY = 5

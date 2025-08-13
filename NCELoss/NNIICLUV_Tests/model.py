@@ -35,7 +35,7 @@ class NearestNeighborContrastiveI3D(nn.Module):
 
         # Inter-video projection head
         #self.video_attention = nn.Linear(feature_dim, 1) # Attention to do this
-        self.time_conv = nn.Conv1d(in_channels=time_steps, out_channels=1, kernel_size=3, padding=1)
+        self.time_conv = nn.Conv1d(in_channels=(time_steps), out_channels=1, kernel_size=3, padding=1)
         self.inter_projector = VAE_Simple(feature_dim, projection_dim)
 
         # Now make a decoder for the intra and inter projections
@@ -57,17 +57,17 @@ class NearestNeighborContrastiveI3D(nn.Module):
         # Pass features through projection heads
         # features are batchxtimexdim size
         mu_intra, logvar_intra, intra_embeddings = self.intra_projector(features)
-
+        batch, time, dims = features.shape
         batch, time, latent_dims = mu_intra.shape
 
-        pooled_features = self.time_conv(features.reshape(batch, latent_dims, time)).reshape(batch, latent_dims) # batchxlatent_dimsx1
+        pooled_features = self.time_conv(features).reshape(batch, dims) # batchxlatent_dimsx1
         mu_inter, logvar_inter, raw_inter_embeddings = self.inter_projector(pooled_features) # batchxdim
         # Repeat everything
-
+        
         # Decoding...
         decoded_intra = self.intra_decoder(intra_embeddings)
         # Add pos encoding
-        inter_embeddings = raw_inter_embeddings.repeat(1, time, 1) + self.inter_time_embed.unsqueeze(0)  # batchxtimexlatent_dims
+        inter_embeddings = raw_inter_embeddings.unsqueeze(1).repeat(1, time, 1) + self.inter_time_embed.unsqueeze(0)  # batchxtimexlatent_dims
         inter_embeddings = self.layer_norm(inter_embeddings)
         decoded_inter = self.inter_decoder(inter_embeddings) # batchxtimexlatent_dims
 

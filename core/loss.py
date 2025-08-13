@@ -89,7 +89,7 @@ class TotalLoss(nn.Module):
             self.vid_pseudo_loss = KLDivergencePseudoLoss() #LatentLossMasked() # Masked() #VidPseudoLoss()
         else:
             self.vid_pseudo_loss = LatentLossMasked()
-        self.latent_loss = LatentLoss()
+        self.reconstruction_loss = ReconstructionLoss()
         self.kldiv_loss = KLDivLoss()
         self.nce_weight = cfg.NCE_WEIGHT
         self.pseudo_weight = cfg.PSEUDO_WEIGHT
@@ -109,8 +109,8 @@ class TotalLoss(nn.Module):
         loss_nce = self.nce_criterion(sampled_embeddings, positives, negatives)
         #print(f'Vid scores {video_scores.shape}, pseudo {pseudo_video_scores.shape}')
         loss_pseudo = self.vid_pseudo_loss(video_scores, pseudo_video_scores) # Video Pseudo Label Loss
-        loss_latent_inter = self.latent_loss(input_feature, decoded_inter)
-        loss_latent_intra = self.latent_loss(input_feature, decoded_intra)
+        loss_latent_inter = self.reconstruction_loss(input_feature, decoded_inter)
+        loss_latent_intra = self.reconstruction_loss(input_feature, decoded_intra)
         batch, time, feats = intra_params[0].shape
         # Reshape intra_params and inter_params to match the expected dimensions
         kldiv_intra = self.kldiv_loss(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
