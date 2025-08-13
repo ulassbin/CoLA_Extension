@@ -53,6 +53,7 @@ class CoLA(nn.Module):
         self.num_classes = cfg.NUM_CLASSES
 
         self.projection_module = NearestNeighborContrastiveI3D(cfg.FEATS_DIM, cfg.PROJ_DIM)
+        self.feature_projection = nn.Linear(2*cfg.PROJ_DIM, cfg.PROJ_DIM) # From paper reviews
         self.actionness_module = Actionness_Module(cfg.PROJ_DIM, cfg.NUM_CLASSES)
 
         self.softmax = nn.Softmax(dim=1)
@@ -116,6 +117,12 @@ class CoLA(nn.Module):
         hard_bkg = self.select_topk_embeddings(aness_region_outer, embeddings, k_hard)
 
         return hard_act, hard_bkg
+    
+    def get_combined_embeddings(self, intra_embeddings, inter_embeddings):
+        batch, T, proj_dim = intra_embeddings.shape
+        combined_embeddings = torch.cat((intra_embeddings, inter_embeddings.repeat(1, T, 1)), dim=2)
+        combined_embeddings = self.feature_projection(combined_embeddings)  # batchxtimexproj_dim
+        return combined_embeddings
 
     def get_video_cls_scores(self, cas, k_easy):
         sorted_scores, _= cas.sort(descending=True, dim=1)
@@ -130,7 +137,8 @@ class CoLA(nn.Module):
 
         intra_embeddings, inter_embeddings, decoded_inter, decoded_intra, intra_params, inter_params = self.projection_module(x)
         #print('Intra embeddings shape ', intra_embeddings.shape)
-        combined_embeddings = (intra_embeddings + inter_embeddings) / 2.0
+        combined_embeddings = self.get_combined_embeddings(intra_embeddings, inter_embeddings)
+
         embeddings, cas, actionness = self.actionness_module(combined_embeddings)
         easy_act, easy_bkg = self.easy_snippets_mining(actionness, embeddings, k_easy)
         hard_act, hard_bkg = self.hard_snippets_mining(actionness, embeddings, k_hard)

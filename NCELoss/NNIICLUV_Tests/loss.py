@@ -71,6 +71,7 @@ class KLDivLoss(nn.Module):
    def forward(self, mu, logvar):
       #print(f'mu {mu.shape}, logvar {logvar.shape}')
       kl = -0.5 * torch.sum(1+logvar - mu.pow(2)-logvar.exp(), dim=1).mean()
+
       #print(f'Kl shape {kl.shape}')
       return kl # .sum(dim=1).mean()
 

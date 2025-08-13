@@ -27,13 +27,15 @@ class VAE_Simple(nn.Module):
 
 
 class NearestNeighborContrastiveI3D(nn.Module):
-    def __init__(self, feature_dim=2048, projection_dim=128):
+    def __init__(self, feature_dim=2048, projection_dim=128, time_steps=1000):
         super(NearestNeighborContrastiveI3D, self).__init__()
 
         # Intra-video projection head
         self.intra_projector = VAE_Simple(feature_dim, projection_dim)
 
         # Inter-video projection head
+        #self.video_attention = nn.Linear(feature_dim, 1) # Attention to do this
+        self.time_conv = nn.Conv1d(in_channels=time_steps, out_channels=1, kernel_size=3, padding=1)
         self.inter_projector = VAE_Simple(feature_dim, projection_dim)
 
         # Now make a decoder for the intra and inter projections
@@ -43,6 +45,8 @@ class NearestNeighborContrastiveI3D(nn.Module):
             nn.Linear(feature_dim, feature_dim)
         )
 
+        self.inter_time_embed = nn.Parameter(torch.randn(time_steps, projection_dim))
+        self.layer_norm = nn.LayerNorm(projection_dim)
         self.inter_decoder = nn.Sequential(
             nn.Linear(projection_dim, feature_dim),
             nn.LeakyReLU(),
@@ -51,13 +55,23 @@ class NearestNeighborContrastiveI3D(nn.Module):
 
     def forward(self, features):
         # Pass features through projection heads
+        # features are batchxtimexdim size
         mu_intra, logvar_intra, intra_embeddings = self.intra_projector(features)
-        mu_inter, logvar_inter, inter_embeddings = self.inter_projector(features)
 
+        batch, time, latent_dims = mu_intra.shape
+
+        pooled_features = self.time_conv(features.reshape(batch, latent_dims, time)).reshape(batch, latent_dims) # batchxlatent_dimsx1
+        mu_inter, logvar_inter, raw_inter_embeddings = self.inter_projector(pooled_features) # batchxdim
+        # Repeat everything
+
+        # Decoding...
         decoded_intra = self.intra_decoder(intra_embeddings)
-        decoded_inter = self.inter_decoder(inter_embeddings)
+        # Add pos encoding
+        inter_embeddings = raw_inter_embeddings.repeat(1, time, 1) + self.inter_time_embed.unsqueeze(0)  # batchxtimexlatent_dims
+        inter_embeddings = self.layer_norm(inter_embeddings)
+        decoded_inter = self.inter_decoder(inter_embeddings) # batchxtimexlatent_dims
 
-        return intra_embeddings, inter_embeddings, decoded_inter, decoded_intra, [mu_intra, logvar_intra], [mu_inter, logvar_inter]
+        return intra_embeddings, raw_inter_embeddings, decoded_inter, decoded_intra, [mu_intra, logvar_intra], [mu_inter, logvar_inter]
 
     def from_latent_space(self, latent_features, both=False):
         # Pass features through projection heads

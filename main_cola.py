@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings("ignore")
 import core.utils as utils
 from core.model import CoLA
-from core.loss import TotalLoss, LatentLoss 
+from core.loss import TotalLoss, ReconstructionLoss 
 from core.config import cfg
 from core.utils import AverageMeter
 from core.dataset import NpyFeature
@@ -106,22 +106,22 @@ class Trainer:
       label = label.cuda()
       optimizer.zero_grad()
       video_scores, contrast_pairs, _, _, all_embeddings, intra_params, inter_params = self.net(data)
-      criterion = LatentLoss()
+      reconstruction_loss = ReconstructionLoss()
       kl_criterion = KLDivLoss()
       decoded_inter = all_embeddings[2]
       decoded_intra = all_embeddings[3]
-      pre_intra = criterion(data, decoded_intra)
-      pre_inter = criterion(data, decoded_inter)
+      pre_intra = reconstruction_loss(data, decoded_intra)
+      pre_inter = reconstruction_loss(data, decoded_inter)
       cost = cfg.LATENT_LOSS_PRE * (pre_intra + pre_inter) / 2.0
       batch, time, feats = intra_params[0].shape
       # Reshape intra_params and inter_params to match the expected dimensions
       kldiv_intra = kl_criterion(intra_params[0].reshape(-1, feats), intra_params[1].reshape(-1,feats)) # param0 is mu, param1 is logvar # (B*Txfeats) # framewise representation
-      kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) / time # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
+      kldiv_inter = kl_criterion(inter_params[0].reshape(batch, -1), inter_params[1].reshape(batch,-1)) # param 0 is mu, param1 is logvar # (BxT*feats) # video wise representation
       cost += cfg.KLDIV_LOSS * (kldiv_intra + cfg.KLDIV_INTER_SCALING*kldiv_inter) / 2.0
       cost.backward()
       optimizer.step()
-      writer.add_scalar('Pretrain/Latent_intra', pre_intra.cpu().item(), step)
-      writer.add_scalar('Pretrain/Latent_inter', pre_inter.cpu().item(), step)
+      writer.add_scalar('Pretrain/Reconst_intra', pre_intra.cpu().item(), step)
+      writer.add_scalar('Pretrain/Reconst_inter', pre_inter.cpu().item(), step)
       writer.add_scalar('Pretrain/Kldiv_intra', kldiv_intra.cpu().item(), step)
       writer.add_scalar('Pretrain/Kldiv_inter', kldiv_inter.cpu().item(), step)
       return cost
@@ -147,7 +147,7 @@ class Trainer:
       # Sample intra_embeddings
       intra_embeddings = all_embeddings[0]
       inter_embeddings = all_embeddings[1]
-      combined_embeddings = (all_embeddings[0] + all_embeddings[1]) / 2.0
+      combined_embeddings = self.net.get_combined_embeddings(intra_embeddings, inter_embeddings)
       embedding_targets = self.sample_embeddings(combined_embeddings)
       #print('Embedding Targets {}, Intra Embeddings {}'.format(embedding_targets.shape, intra_embeddings.shape))
 

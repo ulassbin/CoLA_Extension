@@ -68,9 +68,9 @@ class VidPseudoLoss(nn.Module):
         return loss
         
 
-class LatentLoss(nn.Module):
+class ReconstructionLoss(nn.Module):
     def __init__(self):
-        super(LatentLoss, self).__init__()
+        super(ReconstructionLoss, self).__init__()
         self.mse_criterion = nn.MSELoss()
     
     def forward(self, base_feature, decoded_feature):
